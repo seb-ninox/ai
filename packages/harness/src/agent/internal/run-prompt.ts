@@ -28,7 +28,7 @@ import {
   type LanguageModelV4ToolCall,
   type LanguageModelV4Usage,
 } from '@ai-sdk/provider';
-import { parseToolCall, validateToolContext } from 'ai/internal';
+import { parseToolCall } from 'ai/internal';
 import type {
   ContentPart,
   ProviderMetadata,
@@ -43,6 +43,7 @@ import type { HarnessAgentToolApprovalConfiguration } from '../harness-agent-set
 import { HarnessStreamTextResult } from './harness-stream-text-result';
 import { createStreamBlockNormalizer } from './normalize-stream-blocks';
 import { translateStreamPart } from './translate-stream-part';
+import { validateToolContext } from './validate-tool-context';
 import { stripWorkDir } from './strip-work-dir';
 import {
   createTurnTelemetry,

@@ -1,6 +1,5 @@
 ---
 '@ai-sdk/harness': patch
-'ai': patch
 ---
 
 fix(harness): pass tool context to host tool `execute()` and honor `settings.runtimeContext`

@@ -48,6 +48,7 @@ import {
 import {
   createPiTranslatorState,
   finishPiApprovalStep,
+  flushOpenStep,
   translatePiEvent,
   type PiTranslatorState,
 } from './pi-translate';
@@ -771,6 +772,21 @@ export async function createPiSession(
           if (suspending && isAbortError(terminalError)) return;
           currentEmit?.({ type: 'error', error: new Error(terminalError) });
           return;
+        }
+
+        /*
+         * Pi can resolve `prompt()` without a `turn_end` (and without a
+         * recognized terminal error) when the model stream ends abnormally —
+         * e.g. cut mid-message. The translator then still holds an open text
+         * block and an unfinished step, and emitting the terminal `finish`
+         * below would violate the harness contract (`finish-step` before
+         * `finish`) and fail the turn, discarding already-streamed content.
+         * Flush whatever is still open; a no-op after a normal `turn_end`.
+         */
+        if (translatorState) {
+          for (const part of flushOpenStep(translatorState)) {
+            currentEmit?.(part);
+          }
         }
 
         const stats = session.getSessionStats();

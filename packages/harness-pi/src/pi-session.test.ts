@@ -303,6 +303,71 @@ describe('createPiSession', () => {
     });
   });
 
+  it('closes the open step before terminal finish when prompt resolves without turn_end', async () => {
+    const listeners: Array<(raw: unknown) => void> = [];
+    const prompt = vi.fn(async () => {
+      // The model stream is cut mid-message: text streams, then Pi resolves
+      // `prompt()` with no message_end/turn_end and no terminal error event.
+      for (const event of [
+        { type: 'turn_start' },
+        { type: 'message_start', message: { role: 'assistant', content: [] } },
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'Hi there' },
+        },
+      ]) {
+        for (const listener of [...listeners]) listener(event);
+      }
+    });
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt,
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn((listener: (raw: unknown) => void) => {
+        listeners.push(listener);
+        return () => {
+          const index = listeners.indexOf(listener);
+          if (index >= 0) listeners.splice(index, 1);
+        };
+      }),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-cut-mid-message',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const emit = vi.fn();
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [],
+      emit,
+    });
+    await control.done;
+
+    const types = emit.mock.calls.map(
+      call => (call[0] as { type: string }).type,
+    );
+    // The harness contract: `finish-step` must precede the terminal `finish`,
+    // and the open text block must be closed first.
+    expect(types).not.toContain('error');
+    const textEndIndex = types.indexOf('text-end');
+    const finishStepIndex = types.indexOf('finish-step');
+    const finishIndex = types.indexOf('finish');
+    expect(textEndIndex).toBeGreaterThan(-1);
+    expect(finishStepIndex).toBeGreaterThan(textEndIndex);
+    expect(finishIndex).toBeGreaterThan(finishStepIndex);
+  });
+
   it('uses agentDir for auth, models, and settings when provided', async () => {
     vi.mocked(ModelRuntime.create).mockClear();
     vi.mocked(SettingsManager.inMemory).mockClear();

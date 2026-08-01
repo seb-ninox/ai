@@ -3,6 +3,7 @@ import type { PiSessionEvent } from './pi-events';
 import {
   createPiTranslatorState,
   finishPiApprovalStep,
+  flushOpenStep,
   translatePiEvent,
   type PiTranslatorState,
 } from './pi-translate';
@@ -497,5 +498,117 @@ describe('translatePiEvent', () => {
         tokensBefore: 50000,
       },
     ]);
+  });
+});
+
+describe('flushOpenStep', () => {
+  function textDeltas(state: PiTranslatorState) {
+    return emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'Hi there' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+  }
+
+  it('closes an open text block and finishes the step when the turn was cut mid-message', () => {
+    const state = createPiTranslatorState();
+    const streamed = textDeltas(state);
+    const textId = (streamed[0] as { id: string }).id;
+
+    const out = flushOpenStep(state);
+
+    expect(out[0]).toEqual({ type: 'text-end', id: textId });
+    expect(out[1]).toMatchObject({ type: 'finish-step' });
+    expect(state.stepOpen).toBe(false);
+    expect(state.currentTextId).toBeUndefined();
+  });
+
+  it('finishes a step message_end left open (no turn_end arrived)', () => {
+    const state = createPiTranslatorState();
+    textDeltas(state);
+    translatePiEvent(
+      {
+        type: 'message_end',
+        message: { role: 'assistant', content: 'Hi there' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    const out = flushOpenStep(state);
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ type: 'finish-step' });
+  });
+
+  it('clears pending tool calls whose results never arrived', () => {
+    const state = createPiTranslatorState();
+    textDeltas(state);
+    translatePiEvent(
+      {
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: 'call-1' }],
+        },
+      } as PiSessionEvent,
+      state,
+    );
+
+    const out = flushOpenStep(state);
+
+    expect(out[out.length - 1]).toMatchObject({ type: 'finish-step' });
+    expect(state.pendingStepToolCallIds.size).toBe(0);
+  });
+
+  it('closes an open reasoning block before finishing the step', () => {
+    const state = createPiTranslatorState();
+    const streamed = emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'hmm' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+    const reasoningId = (streamed[0] as { id: string }).id;
+
+    const out = flushOpenStep(state);
+
+    expect(out[0]).toEqual({ type: 'reasoning-end', id: reasoningId });
+    expect(out[1]).toMatchObject({ type: 'finish-step' });
+  });
+
+  it('is a no-op after a turn that closed normally', () => {
+    const state = createPiTranslatorState();
+    textDeltas(state);
+    translatePiEvent(
+      {
+        type: 'turn_end',
+        message: { role: 'assistant', content: 'Hi there' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(flushOpenStep(state)).toEqual([]);
+  });
+
+  it('is a no-op when nothing streamed at all', () => {
+    const state = createPiTranslatorState();
+    expect(flushOpenStep(state)).toEqual([]);
   });
 });

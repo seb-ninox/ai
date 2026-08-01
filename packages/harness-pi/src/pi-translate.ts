@@ -162,6 +162,40 @@ export function finishPiApprovalStep(
   return finishStep(state);
 }
 
+/**
+ * Close whatever the turn left open — active text/reasoning blocks and the
+ * step itself — so the session layer can emit a terminal `finish` without
+ * violating the harness contract (`finish-step` must precede `finish`).
+ *
+ * Pi resolves `session.prompt()` without a `turn_end` event when a turn ends
+ * abnormally but not with a recognized terminal error (e.g. the provider
+ * stream is cut mid-message). Without this flush the streamed content stays
+ * attributed to an unfinished step and `HarnessAgent` fails the whole turn,
+ * discarding text the user already saw. Returns an empty array when the turn
+ * closed normally, so callers can emit it unconditionally.
+ */
+export function flushOpenStep(state: PiTranslatorState): HarnessV1StreamPart[] {
+  const parts: HarnessV1StreamPart[] = [];
+  if (state.currentTextId) {
+    parts.push({ type: 'text-end', id: state.currentTextId });
+    state.currentTextId = undefined;
+  }
+  if (state.reasoningStarted && state.currentReasoningId) {
+    parts.push({ type: 'reasoning-end', id: state.currentReasoningId });
+    state.reasoningStarted = false;
+    state.currentReasoningId = undefined;
+  }
+  // An open block proves step content exists even if no assistant
+  // `message_start` ever set `stepOpen` (deltas alone open a step downstream).
+  if (parts.length > 0) {
+    state.stepOpen = true;
+  }
+  // Tool calls whose results never arrived cannot complete anymore — the turn
+  // is over. Clear them so the step can close.
+  state.pendingStepToolCallIds.clear();
+  return [...parts, ...finishStep(state)];
+}
+
 function extractPiToolCallIds(message: PiSessionEvent['message']): string[] {
   if (!message || message.role !== 'assistant') return [];
   if (!Array.isArray(message.content)) return [];

@@ -37,7 +37,7 @@
   "dependencies": {
     "@ai-sdk/harness": "workspace:*",
     "@ai-sdk/provider-utils": "workspace:*",
-    "just-bash": "^2.14.5"
+    "just-bash": "^3.2.0"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

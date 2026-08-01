@@ -46,6 +46,22 @@ const sandbox = createJustBashSandbox({
 });
 ```
 
+## Sandbox Capabilities
+
+Everything `just-bash`'s `Sandbox.create` accepts is forwarded, including the capability flags that are off by default:
+
+```ts
+const sandbox = createJustBashSandbox({
+  cwd: '/work',
+  python: true, // enable python3/python
+  javascript: true, // enable js-exec (QuickJS)
+  commands: ['cat', 'grep', 'ls'], // restrict the built-in command set
+  network: { allowedUrls: ['https://api.example.com/*'] },
+});
+```
+
+Network access is off unless you configure `network` or `fetch`, and Python and js-exec are off unless enabled — each widens the code an agent can run, so turn them on deliberately.
+
 ## Durable Sessions
 
 A just-bash filesystem is process memory, so by default a session dies with the process that created it and `HarnessAgent` refuses to resume one. Supply a `store` and the provider snapshots each session's filesystem into it, then rehydrates it in `resumeSession()` — potentially in a different process or on a different replica.
@@ -95,3 +111,5 @@ Snapshots also carry whatever a harness adapter keeps inside the sandbox. Pi per
 ### Limits
 
 Snapshots are eager and complete: the whole filesystem is serialized on every save, with file contents base64-encoded. Cost scales with workdir size, so cap what agents write and keep large artifacts in object storage. Snapshot contents are tenant data — uploads, model output, conversation history — so scope keys per tenant, expire them, and hold them to the same encryption-at-rest posture as the rest of that store.
+
+`store` cannot be combined with `fs` or `overlayRoot`: those are forwarded to every session, so all sessions would share one filesystem and overwrite each other's snapshots. The provider throws at construction rather than letting that happen at runtime.

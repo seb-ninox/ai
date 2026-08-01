@@ -1,4 +1,4 @@
-import { Sandbox } from 'just-bash';
+import { InMemoryFs, Sandbox } from 'just-bash';
 import { describe, expect, it, vi } from 'vitest';
 import { createJustBashSandbox } from './just-bash-sandbox';
 import type {
@@ -55,6 +55,31 @@ describe('JustBashSandboxProvider persistence', () => {
     });
 
     expect(provider.resumeSession).toBeUndefined();
+  });
+
+  it('rejects a store combined with a shared filesystem', () => {
+    // Every session would get the same `fs`, so snapshots would overwrite each
+    // other and sessions would read each other's files.
+    expect(() =>
+      createJustBashSandbox({
+        cwd: '/work',
+        fs: new InMemoryFs(),
+        store: memoryStore(),
+      }),
+    ).toThrow(/`store` cannot be combined with `fs`/);
+
+    expect(() =>
+      createJustBashSandbox({
+        overlayRoot: '/tmp',
+        store: memoryStore(),
+      }),
+    ).toThrow(/`store` cannot be combined with `overlayRoot`/);
+  });
+
+  it('still allows a shared filesystem without a store', () => {
+    expect(() =>
+      createJustBashSandbox({ cwd: '/work', fs: new InMemoryFs() }),
+    ).not.toThrow();
   });
 
   it('restores a stopped session in a later provider instance', async () => {

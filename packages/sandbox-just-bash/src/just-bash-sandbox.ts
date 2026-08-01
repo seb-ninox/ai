@@ -101,6 +101,26 @@ export class JustBashSandboxProvider implements HarnessV1SandboxProvider {
   constructor(private readonly settings: JustBashSandboxSettings) {
     const store = settings.store;
     /*
+     * `fs` and `overlayRoot` are forwarded to every `Sandbox.create` call, so
+     * all sessions would share one filesystem — snapshots would overwrite each
+     * other and sessions would read each other's files. Fail loudly at
+     * construction instead of corrupting sessions at runtime.
+     */
+    if (store != null && !('sandbox' in settings && settings.sandbox)) {
+      const shared =
+        settings.fs != null
+          ? 'fs'
+          : settings.overlayRoot != null
+            ? 'overlayRoot'
+            : undefined;
+      if (shared != null) {
+        throw new Error(
+          `createJustBashSandbox: \`store\` cannot be combined with \`${shared}\`, which every session would share. ` +
+            'Persistence requires each session to own its filesystem.',
+        );
+      }
+    }
+    /*
      * The harness treats the mere presence of `resumeSession` as "this provider
      * supports resume", so it is installed only when something can actually
      * satisfy it. A caller-owned sandbox is excluded for the same reason

@@ -79,7 +79,7 @@
     "effect": "3.21.3",
     "google-auth-library": "^9.15.1",
     "image-type": "^5.2.0",
-    "just-bash": "^2.14.5",
+    "just-bash": "^3.2.0",
     "mathjs": "^15.2.0",
     "sharp": "^0.33.5",
     "terminal-image": "^2.0.0",

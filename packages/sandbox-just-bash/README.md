@@ -45,3 +45,53 @@ const sandbox = createJustBashSandbox({
   sandbox: await Sandbox.create({ fs: overlay, cwd: overlay.getMountPoint() }),
 });
 ```
+
+## Durable Sessions
+
+A just-bash filesystem is process memory, so by default a session dies with the process that created it and `HarnessAgent` refuses to resume one. Supply a `store` and the provider snapshots each session's filesystem into it, then rehydrates it in `resumeSession()` — potentially in a different process or on a different replica.
+
+The store is yours to implement against whatever you already run; the package ships no backend client.
+
+```ts
+import {
+  createJustBashSandbox,
+  type JustBashSandboxStore,
+} from '@ai-sdk/sandbox-just-bash';
+
+const store: JustBashSandboxStore = {
+  async load({ sessionId }) {
+    const raw = await redis.get(`agent:workdir:${sessionId}`);
+    return raw == null ? undefined : JSON.parse(raw);
+  },
+  async save({ sessionId, snapshot }) {
+    await redis.set(`agent:workdir:${sessionId}`, JSON.stringify(snapshot), {
+      EX: 60 * 60 * 24,
+    });
+  },
+  async remove({ sessionId }) {
+    await redis.del(`agent:workdir:${sessionId}`);
+  },
+};
+
+const sandbox = createJustBashSandbox({ cwd: '/work', store });
+```
+
+Snapshots are written when a session is created with a `sessionId` and then:
+
+| Event                                    | Effect                                     |
+| ---------------------------------------- | ------------------------------------------ |
+| `session.stop()`                         | `store.save` — the session is resumable    |
+| `session.destroy()`                      | `store.remove` — resumability is discarded |
+| `provider.persistSession({ sessionId })` | `store.save` without ending the session    |
+
+`stop()` covers sessions that end cleanly. Call `persistSession` at any boundary you want to be able to recover from — typically the end of a turn — for sessions held open across turns, such as one parked on a pending tool approval. Sessions created without a `sessionId` are never persisted, since nothing identifies them.
+
+`resumeSession()` starts with an empty filesystem when the store holds no snapshot, rather than failing: an expired or evicted entry is a normal outcome for a TTL'd store. Check `store.load` yourself first if your product needs to tell "expired" from "never existed".
+
+Snapshots also carry whatever a harness adapter keeps inside the sandbox. Pi persists its session journal into the session work directory, so a resumed session recovers its conversation history along with the files.
+
+`createJustBashSnapshot` and `restoreJustBashSandbox` are exported if you want to drive snapshots yourself.
+
+### Limits
+
+Snapshots are eager and complete: the whole filesystem is serialized on every save, with file contents base64-encoded. Cost scales with workdir size, so cap what agents write and keep large artifacts in object storage. Snapshot contents are tenant data — uploads, model output, conversation history — so scope keys per tenant, expire them, and hold them to the same encryption-at-rest posture as the rest of that store.

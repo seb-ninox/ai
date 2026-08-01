@@ -31,12 +31,40 @@ export class JustBashNetworkSandboxSession
   readonly id: string;
   readonly defaultWorkingDirectory: string;
   private readonly ownsLifecycle: boolean;
+  private readonly onStop: (() => Promise<void>) | undefined;
+  private readonly onDestroy: (() => Promise<void>) | undefined;
+  private ended = false;
 
-  constructor(input: { sandbox: Sandbox; ownsLifecycle: boolean }) {
+  constructor(input: {
+    sandbox: Sandbox;
+    ownsLifecycle: boolean;
+    /**
+     * Runs once, when the session stops and its state should survive. The
+     * provider uses it to snapshot the filesystem into a configured store.
+     */
+    onStop?: () => Promise<void>;
+    /**
+     * Runs once, when the session is destroyed and its state should not
+     * survive. The provider uses it to drop the stored snapshot.
+     */
+    onDestroy?: () => Promise<void>;
+  }) {
     super(input.sandbox);
     this.ownsLifecycle = input.ownsLifecycle;
+    this.onStop = input.onStop;
+    this.onDestroy = input.onDestroy;
     this.id = randomUUID();
     this.defaultWorkingDirectory = input.sandbox.bashEnvInstance.getCwd();
+  }
+
+  /**
+   * The underlying `just-bash` sandbox.
+   *
+   * @internal — used by the provider to snapshot a live session. Tools receive
+   * the narrowed `restricted()` view and never reach this.
+   */
+  get sandboxInstance(): Sandbox {
+    return this.sandbox;
   }
 
   readonly ports: ReadonlyArray<number> = [];
@@ -57,13 +85,25 @@ export class JustBashNetworkSandboxSession
     });
   };
 
+  /*
+   * just-bash has no explicit shutdown; the sandbox is garbage-collected along
+   * with its in-memory filesystem once references drop. The lifecycle hooks are
+   * the only real work here — they give a configured store its last chance to
+   * capture the filesystem before it goes.
+   *
+   * Both settle at most once: `destroy` falls through to `stop` in the harness
+   * contract, and a snapshot must not be written after the session was
+   * deliberately discarded.
+   */
   stop = async (): Promise<void> => {
-    if (!this.ownsLifecycle) return;
-    // just-bash has no explicit shutdown; the sandbox is garbage-collected
-    // along with its in-memory filesystem once references drop.
+    if (!this.ownsLifecycle || this.ended) return;
+    this.ended = true;
+    await this.onStop?.();
   };
 
   destroy = async (): Promise<void> => {
-    await this.stop();
+    if (!this.ownsLifecycle || this.ended) return;
+    this.ended = true;
+    await this.onDestroy?.();
   };
 }

@@ -25,7 +25,8 @@
     "konsistent": "turbo run konsistent:validate konsistent:check --log-order=grouped --log-prefix=none",
     "konsistent:check": "konsistent --config-path .github/konsistent.json",
     "konsistent:validate": "konsistent validate --config-path .github/konsistent.json",
-    "worktree:setup": "bash tools/worktree-setup.sh"
+    "worktree:setup": "bash tools/worktree-setup.sh",
+    "release:fork": "node tools/release-fork.mjs"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

@@ -219,8 +219,14 @@ interface PendingToolResult {
   resolve: (value: unknown) => void;
 }
 
+/** The verdict a host returns for one approval request. */
+interface ToolApprovalDecision {
+  approved: boolean;
+  reason?: string;
+}
+
 interface PendingToolApproval {
-  resolve: (value: { approved: boolean; reason?: string }) => void;
+  resolve: (value: ToolApprovalDecision) => void;
 }
 
 interface ActivePiTurn {
@@ -417,6 +423,26 @@ export async function createPiSession(
   let instructionsApplied = input.isResume;
   const pendingToolResults = new Map<string, PendingToolResult>();
   const pendingToolApprovals = new Map<string, PendingToolApproval>();
+  /*
+   * Outcomes the host submitted for a call that has no waiter yet, keyed by the
+   * id the host addressed.
+   *
+   * The host and Pi do not have to arrive in that order. A turn parked on host
+   * input is normally continued on the parked in-process session, whose pending
+   * maps still hold the waiter — but when that session is gone (evicted, or the
+   * process restarted) the continuation runs against a session rebuilt from the
+   * persisted journal, and Pi re-drives the recorded tool call only after the
+   * host has already submitted the outcome for it. Dropping the outcome in that
+   * window is silent and unrecoverable: the tool's `execute` promise never
+   * settles, so an approved call re-runs and looks to the model like a failure
+   * it should retry, and a denied one strands the turn forever with no error.
+   *
+   * Holding the outcome here instead makes the two orders equivalent — whichever
+   * side arrives second consumes what the first left. Entries are consumed on
+   * take and cleared when the session settles, so nothing outlives its turn.
+   */
+  const earlyToolResults = new Map<string, unknown>();
+  const earlyToolApprovals = new Map<string, ToolApprovalDecision>();
 
   // Emit channel set at the start of every doPromptTurn and cleared on end.
   let currentEmit: ((part: HarnessV1StreamPart) => void) | undefined;
@@ -445,6 +471,10 @@ export async function createPiSession(
       pending.resolve({ error: reason });
     }
     pendingToolResults.clear();
+    // The session is going away, so nothing can still come along to claim an
+    // unconsumed outcome — keeping it would only leak into the next session
+    // that happens to reuse the id.
+    earlyToolResults.clear();
   }
 
   function settlePendingToolApprovals(reason: string): void {
@@ -452,6 +482,7 @@ export async function createPiSession(
       pending.resolve({ approved: false, reason });
     }
     pendingToolApprovals.clear();
+    earlyToolApprovals.clear();
   }
 
   async function persistSessionFile(): Promise<void> {
@@ -487,22 +518,34 @@ export async function createPiSession(
 
     return {
       async submitToolResult(args) {
-        const pending = pendingToolResults.get(args.toolCallId);
-        if (!pending) return;
-        pendingToolResults.delete(args.toolCallId);
         /*
          * Preserve the original output so the result projection can surface it
          * unchanged. The tool handler stringifies the output for the runtime
          * (so the model reads it), and Pi echoes that text back — without this
          * the consumer-facing result would be the serialized string instead of
-         * the original object.
+         * the original object. Recorded before the waiter lookup because it is
+         * needed either way: an outcome that lands ahead of Pi is consumed by
+         * the tool handler later, and the projection still has to un-stringify
+         * it when the matching result event arrives.
          */
         translatorState?.hostToolResults.set(args.toolCallId, args.output);
+        const pending = pendingToolResults.get(args.toolCallId);
+        if (!pending) {
+          earlyToolResults.set(args.toolCallId, args.output);
+          return;
+        }
+        pendingToolResults.delete(args.toolCallId);
         pending.resolve(args.output);
       },
       async submitToolApproval(args) {
         const pending = pendingToolApprovals.get(args.approvalId);
-        if (!pending) return;
+        if (!pending) {
+          earlyToolApprovals.set(args.approvalId, {
+            approved: args.approved,
+            reason: args.reason,
+          });
+          return;
+        }
         pendingToolApprovals.delete(args.approvalId);
         pending.resolve({
           approved: args.approved,
@@ -519,7 +562,16 @@ export async function createPiSession(
   async function requestBuiltinToolApproval(args: {
     toolCallId: string;
     nativeName: (typeof PI_NATIVE_BUILTIN_NAMES)[number];
-  }): Promise<{ approved: boolean; reason?: string }> {
+  }): Promise<ToolApprovalDecision> {
+    // A decision the host already submitted for this call — it continued a
+    // parked turn whose session no longer holds the waiter, so Pi is only now
+    // re-driving the recorded call. Answer from it instead of asking the user
+    // to decide the same call twice.
+    const earlyDecision = earlyToolApprovals.get(args.toolCallId);
+    if (earlyDecision !== undefined) {
+      earlyToolApprovals.delete(args.toolCallId);
+      return earlyDecision;
+    }
     if (
       !piBuiltinToolRequiresApproval({
         permissionMode,
@@ -562,7 +614,7 @@ export async function createPiSession(
         }),
       ),
       ...userTools.map(spec =>
-        buildUserToolDefinition(spec, pendingToolResults),
+        buildUserToolDefinition(spec, pendingToolResults, earlyToolResults),
       ),
     ];
     return {
@@ -1236,6 +1288,7 @@ function buildBuiltinToolDefinition(input: {
 function buildUserToolDefinition(
   spec: HarnessV1ToolSpec,
   pending: Map<string, PendingToolResult>,
+  early: Map<string, unknown>,
 ): ToolDefinition {
   const schema = spec.inputSchema ?? {
     type: 'object',
@@ -1248,6 +1301,18 @@ function buildUserToolDefinition(
     description: spec.description ?? `User-registered tool ${spec.name}`,
     parameters: toolSpecToTypeBoxParameters(schema),
     async execute(toolCallId) {
+      /*
+       * An outcome the host submitted before Pi drove this call. Returning it
+       * is what makes the host tool run exactly once: without it Pi would sit
+       * on a promise nobody can resolve any more, and the host's already-applied
+       * effect would be invisible to the model. Checked with `has` rather than a
+       * truthiness test because `undefined` is a legitimate tool output.
+       */
+      if (early.has(toolCallId)) {
+        const output = early.get(toolCallId);
+        early.delete(toolCallId);
+        return asPiToolResult(serializeToolOutput(output));
+      }
       return new Promise<unknown>(resolve => {
         pending.set(toolCallId, { resolve });
       }).then(output => asPiToolResult(serializeToolOutput(output)));

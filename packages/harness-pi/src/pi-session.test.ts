@@ -178,6 +178,131 @@ describe('createPiSession', () => {
     );
   });
 
+  /*
+   * A turn parked on host input is normally continued on the parked in-process
+   * session, which still holds the tool's waiter. When that session is gone the
+   * continuation runs against one rebuilt from the journal, so the host submits
+   * the outcome BEFORE Pi re-drives the recorded call. These two cover that
+   * order; dropping the outcome there stranded the tool promise forever, which
+   * surfaced as an approved write the model re-proposed (it never saw a result)
+   * and a denied one that hung the turn with no error at all.
+   */
+  it('delivers a tool result submitted before Pi drove the call', async () => {
+    const outcomeSubmitted = createDeferred<void>();
+    let resolvedToolResult: unknown;
+    const prompt = vi.fn(async () => {
+      await outcomeSubmitted.promise;
+      const tool = piMock.customTools.find(tool => tool.name === 'weather');
+      if (!tool) throw new Error('Expected weather tool.');
+      resolvedToolResult = await tool.execute(
+        'tool-1',
+        {},
+        undefined,
+        undefined,
+        undefined as never,
+      );
+    });
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt,
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-early-result',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+    });
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [{ name: 'weather' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+
+    await control.submitToolResult({
+      toolCallId: 'tool-1',
+      output: { weather: 'sunny' },
+    });
+    outcomeSubmitted.resolve();
+    await control.done;
+
+    expect(resolvedToolResult).toEqual({
+      content: [{ type: 'text', text: '{"weather":"sunny"}' }],
+      details: undefined,
+    });
+  });
+
+  it('settles a denied tool call submitted before Pi drove the call', async () => {
+    const outcomeSubmitted = createDeferred<void>();
+    let resolvedToolResult: unknown;
+    const prompt = vi.fn(async () => {
+      await outcomeSubmitted.promise;
+      const tool = piMock.customTools.find(tool => tool.name === 'weather');
+      if (!tool) throw new Error('Expected weather tool.');
+      resolvedToolResult = await tool.execute(
+        'tool-1',
+        {},
+        undefined,
+        undefined,
+        undefined as never,
+      );
+    });
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt,
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-early-denial',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+    });
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [{ name: 'weather' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+
+    // The exact payload the harness submits for a denied approval.
+    await control.submitToolResult({
+      toolCallId: 'tool-1',
+      output: { type: 'execution-denied', reason: 'Denied by user' },
+    });
+    outcomeSubmitted.resolve();
+    await control.done;
+
+    expect(resolvedToolResult).toEqual({
+      content: [
+        {
+          type: 'text',
+          text: '{"type":"execution-denied","reason":"Denied by user"}',
+        },
+      ],
+      details: undefined,
+    });
+  });
+
   it('uses agentDir for auth, models, and settings when provided', async () => {
     vi.mocked(ModelRuntime.create).mockClear();
     vi.mocked(SettingsManager.inMemory).mockClear();

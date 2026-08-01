@@ -25,8 +25,11 @@
  *   FORK_SCOPE      private scope to publish under      (default: @ninox)
  *   FORK_PREFIX     name prefix inside the scope        (default: ai-sdk-)
  *   FORK_REGISTRY   registry URL                        (default: https://npm.pkg.github.com)
+ *   FORK_ACCESS     public | restricted                 (default: public)
  *   FORK_TAG        dist-tag                            (default: latest)
  *   FORK_SUFFIX     prerelease identifier               (default: ninox)
+ *
+ * `--registry` and `--access` also work as flags.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from 'node:fs';
@@ -40,15 +43,22 @@ import { join, resolve } from 'node:path';
  */
 const TARGETS = ['harness', 'harness-pi', 'sandbox-just-bash'];
 
-const SCOPE = process.env.FORK_SCOPE ?? '@ninox';
+// TODO: change to @ninox
+const SCOPE = process.env.FORK_SCOPE ?? '@sebninox';
 const PREFIX = process.env.FORK_PREFIX ?? 'ai-sdk-';
-const REGISTRY = process.env.FORK_REGISTRY ?? 'https://npm.pkg.github.com';
 const TAG = process.env.FORK_TAG ?? 'latest';
-const SUFFIX = process.env.FORK_SUFFIX ?? 'ninox';
+// TODO: change to ninox
+const SUFFIX = process.env.FORK_SUFFIX ?? 'sebninox';
 
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const buildNumber = readFlag(args, '--build') ?? '0';
+const REGISTRY =
+  readFlag(args, '--registry') ??
+  process.env.FORK_REGISTRY ??
+  'https://npm.pkg.github.com';
+const ACCESS =
+  readFlag(args, '--access') ?? process.env.FORK_ACCESS ?? 'public';
 
 const repoRoot = resolve(import.meta.dirname, '..');
 
@@ -57,12 +67,37 @@ function readFlag(argv, flag) {
   return index === -1 ? undefined : argv[index + 1];
 }
 
+/** Exit with a readable message instead of a Node stack trace. */
+function fail(message) {
+  console.error(`\nrelease-fork: ${message}\n`);
+  process.exit(1);
+}
+
 function run(command, commandArgs, options = {}) {
-  return execFileSync(command, commandArgs, {
-    encoding: 'utf8',
-    stdio: options.capture === true ? 'pipe' : 'inherit',
-    cwd: options.cwd ?? repoRoot,
-  });
+  try {
+    return execFileSync(command, commandArgs, {
+      encoding: 'utf8',
+      stdio: options.capture === true ? 'pipe' : 'inherit',
+      cwd: options.cwd ?? repoRoot,
+    });
+  } catch (error) {
+    if (options.capture === true) throw error;
+    // The command already streamed its own diagnostics to the terminal.
+    fail(`\`${command} ${commandArgs.join(' ')}\` failed.`);
+  }
+}
+
+/** Command output, or `undefined` when it exits non-zero. */
+function tryRun(command, commandArgs) {
+  try {
+    return execFileSync(command, commandArgs, {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      cwd: repoRoot,
+    }).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 function manifestPath(pkg) {
@@ -96,6 +131,42 @@ for (const entry of plan) {
   console.log(`  ${entry.upstreamName}  ->  ${entry.name}@${entry.version}`);
 }
 console.log(dryRun ? '\n(dry run — nothing is published)\n' : '');
+
+// ─── Preflight ───────────────────────────────────────────────────────────
+
+/*
+ * Check credentials before building and packing. Publishing happens one
+ * package at a time, so discovering a missing token on the second one would
+ * leave a partial release behind.
+ */
+if (!dryRun) {
+  const user = tryRun('npm', ['whoami', '--registry', REGISTRY]);
+  if (user == null) {
+    fail(
+      `not authenticated to ${REGISTRY}.\n\n` +
+        `  npmjs.com:\n` +
+        `    npm login --registry https://registry.npmjs.org --scope ${SCOPE}\n` +
+        `    (then re-run with --registry https://registry.npmjs.org)\n\n` +
+        `  GitHub Packages — add to ~/.npmrc, with a token carrying write:packages:\n` +
+        `    //npm.pkg.github.com/:_authToken=<token>\n\n` +
+        `Current target registry comes from --registry, then FORK_REGISTRY, ` +
+        `then the built-in default.`,
+    );
+  }
+  console.log(`Authenticated to ${REGISTRY} as ${user}.`);
+
+  /*
+   * Both npmjs and GitHub Packages only accept a scope you own. Warn rather
+   * than block: the scope may be an organisation the user belongs to, which
+   * `whoami` cannot tell us.
+   */
+  if (SCOPE !== `@${user}`) {
+    console.log(
+      `Note: publishing under ${SCOPE} as "${user}" — this only works if ` +
+        `${SCOPE} is an organisation you can publish to.`,
+    );
+  }
+}
 
 // ─── Build ───────────────────────────────────────────────────────────────
 
@@ -147,6 +218,13 @@ try {
     manifest.publishConfig = {
       ...manifest.publishConfig,
       registry: REGISTRY,
+      /*
+       * `access` is inherited from the upstream manifest, where it is
+       * `public` — correct for the real AI SDK, but on npmjs it also makes a
+       * fork world-readable. Set FORK_ACCESS=restricted to keep it private
+       * (npmjs requires a paid plan; GitHub Packages follows repo visibility).
+       */
+      access: ACCESS,
       // Provenance needs a CI runner with OIDC; it fails a local publish.
       provenance: false,
     };
@@ -163,6 +241,7 @@ try {
         {
           name: manifest.name,
           version: manifest.version,
+          publishConfig: manifest.publishConfig,
           dependencies: manifest.dependencies,
         },
         null,

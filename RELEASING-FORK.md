@@ -42,7 +42,23 @@ Prints the rewritten manifests and publishes nothing. When it looks right:
 pnpm release:fork -- --build 0
 ```
 
-Authenticate first. For GitHub Packages, with a token carrying `write:packages`:
+The script checks credentials **before** building, so a missing token fails in a second rather than halfway through publishing three packages.
+
+### npmjs.com
+
+For testing under a personal account, where the scope is your npm username:
+
+```bash
+npm login --registry https://registry.npmjs.org --scope @sebninox
+FORK_SCOPE=@sebninox FORK_SUFFIX=sebninox \
+  pnpm release:fork -- --registry https://registry.npmjs.org --build 0
+```
+
+> Scoped packages inherit `access: public` from the upstream manifests, so this publishes to the **public** registry — anyone can read and install it. The code is a fork of Apache-2.0 sources, so nothing secret leaks, but the packages are visible under your name. Pass `--access restricted` to keep them private (needs a paid npm plan).
+
+### GitHub Packages
+
+Authenticate with a token carrying `write:packages`:
 
 ```
 //npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
@@ -53,13 +69,14 @@ GitHub Packages requires the scope to match the owner of the repository the pack
 
 Overridable via environment:
 
-| Variable        | Default                      |
-| --------------- | ---------------------------- |
-| `FORK_SCOPE`    | `@ninox`                     |
-| `FORK_PREFIX`   | `ai-sdk-`                    |
-| `FORK_REGISTRY` | `https://npm.pkg.github.com` |
-| `FORK_TAG`      | `latest`                     |
-| `FORK_SUFFIX`   | `ninox`                      |
+| Variable        | Default                      | Flag         |
+| --------------- | ---------------------------- | ------------ |
+| `FORK_SCOPE`    | `@sebninox`                  |              |
+| `FORK_PREFIX`   | `ai-sdk-`                    |              |
+| `FORK_REGISTRY` | `https://npm.pkg.github.com` | `--registry` |
+| `FORK_ACCESS`   | `public`                     | `--access`   |
+| `FORK_TAG`      | `latest`                     |              |
+| `FORK_SUFFIX`   | `sebninox`                   |              |
 
 ## Consuming from ninox4
 

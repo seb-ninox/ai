@@ -139,6 +139,19 @@ export type HarnessAgentSettings<
   readonly instructions?: string;
 
   /**
+   * Runtime context for this agent. Reaches `stopWhen` conditions and every
+   * `StepResult.runtimeContext`, mirroring
+   * `ToolLoopAgentSettings.runtimeContext`. Treat it as immutable.
+   *
+   * This is agent-level configuration. Values that change per call, or that a
+   * host tool needs in its `execute()`, belong in the per-call `toolsContext`
+   * instead.
+   *
+   * Defaults to `{}` when omitted.
+   */
+  readonly runtimeContext?: RUNTIME_CONTEXT;
+
+  /**
    * Conditions that stop the current result after a completed harness tool
    * step that can continue into another model step. The underlying turn remains
    * unfinished and can be suspended and continued.

@@ -19,6 +19,7 @@ import {
   safeParseJSON,
   type Context,
   type Experimental_SandboxSession as SandboxSession,
+  type InferToolSetContext,
   type ToolSet,
 } from '@ai-sdk/provider-utils';
 import {
@@ -27,7 +28,7 @@ import {
   type LanguageModelV4ToolCall,
   type LanguageModelV4Usage,
 } from '@ai-sdk/provider';
-import { parseToolCall } from 'ai/internal';
+import { parseToolCall, validateToolContext } from 'ai/internal';
 import type {
   ContentPart,
   ProviderMetadata,
@@ -40,6 +41,7 @@ import type { HarnessAgentToolApprovalContinuation } from '../harness-agent-tool
 import type { HarnessAgentToolResultContinuation } from '../harness-agent-tool-result-continuation';
 import type { HarnessAgentToolApprovalConfiguration } from '../harness-agent-settings';
 import { HarnessStreamTextResult } from './harness-stream-text-result';
+import { createStreamBlockNormalizer } from './normalize-stream-blocks';
 import { translateStreamPart } from './translate-stream-part';
 import { stripWorkDir } from './strip-work-dir';
 import {
@@ -85,6 +87,12 @@ export function runPrompt<
   sandboxSession: SandboxSession;
   sessionWorkDir: string;
   runtimeContext: RUNTIME_CONTEXT;
+  /**
+   * Per-tool context map keyed by tool name, as passed to the `generate` /
+   * `stream` call. Each host tool's entry is validated against its
+   * `contextSchema` and handed to `execute()` as the `context` option.
+   */
+  toolsContext?: InferToolSetContext<TOOLS> | undefined;
   abortSignal: AbortSignal | undefined;
   telemetry?: TelemetryOptions | undefined;
   stopConditions?: ReadonlyArray<StopCondition<TOOLS, RUNTIME_CONTEXT>>;
@@ -116,8 +124,7 @@ export function runPrompt<
   const result = new HarnessStreamTextResult<TOOLS, RUNTIME_CONTEXT>({
     tools: input.tools,
     runtimeContext: input.runtimeContext,
-    // toolsContext is not configurable for harnesses; pass undefined cast.
-    toolsContext: undefined as never,
+    toolsContext: (input.toolsContext ?? {}) as never,
     harnessId: input.harness.harnessId,
     sessionId: input.session.sessionId,
   });
@@ -235,6 +242,22 @@ export function runPrompt<
       ]),
     );
     const settledHostToolCallIds = new Set<string>();
+    const blocks = createStreamBlockNormalizer<TOOLS>();
+    /**
+     * Enqueue a translated part, keeping this stream's text/reasoning blocks
+     * self-contained (see {@link createStreamBlockNormalizer}).
+     */
+    const enqueueBlockPart = (part: TextStreamPart<TOOLS>): void => {
+      for (const normalized of blocks.normalize(part)) {
+        result.enqueue(normalized);
+      }
+    };
+    /** Close blocks the runtime left open before the harness settles cleanly. */
+    const closeOpenBlocks = (): void => {
+      for (const part of blocks.closeOpenBlocks()) {
+        result.enqueue(part);
+      }
+    };
     let closingResumedStep = false;
     let pendingStopBoundary:
       | {
@@ -291,6 +314,9 @@ export function runPrompt<
       usage: LanguageModelV4Usage;
       providerMetadata: ProviderMetadata | undefined;
     }): Promise<StepResult<TOOLS, RUNTIME_CONTEXT>> => {
+      // A text/reasoning block cannot span a step boundary: close whatever the
+      // runtime left open before `finish-step` goes out.
+      closeOpenBlocks();
       await telemetry.stepFinish({
         finishReason: input.finishReason,
         usage: input.usage,
@@ -310,6 +336,10 @@ export function runPrompt<
     const finishForHostInputPause = async (options: {
       completeCurrentStep: boolean;
     }): Promise<void> => {
+      // The runtime may keep a text/reasoning block open across the pause and
+      // resume it on the continuation stream. Close it here so this result is
+      // well-formed; the continuation opens its own.
+      closeOpenBlocks();
       if (options.completeCurrentStep) {
         await completeStep({
           finishReason: toolCallsFinishReason,
@@ -452,6 +482,7 @@ export function runPrompt<
       const execution = await maybeExecuteHostTool({
         event: rawToolCall,
         tools: activeTools,
+        toolsContext: input.toolsContext,
         wrappedExecuteTool: telemetry.executeTool,
         sandboxSession: input.sandboxSession,
         abortSignal: input.abortSignal,
@@ -537,6 +568,7 @@ export function runPrompt<
             const { finishReason, usage } = pendingStopBoundary;
             releasePendingStopBoundary();
             await telemetry.end({ finishReason, usage });
+            closeOpenBlocks();
             await result.finish();
             return;
           } else {
@@ -641,7 +673,7 @@ export function runPrompt<
 
         // Forward to consumer as soon as possible.
         for (const part of translateStreamPart<TOOLS>(displayValue)) {
-          result.enqueue(part);
+          enqueueBlockPart(part);
         }
 
         // Tool-call validation lives here (not in translateStreamPart) because
@@ -873,6 +905,7 @@ export function runPrompt<
           const execution = await maybeExecuteHostTool({
             event: toolCall,
             tools: activeTools,
+            toolsContext: input.toolsContext,
             wrappedExecuteTool: telemetry.executeTool,
             sandboxSession: input.sandboxSession,
             abortSignal: input.abortSignal,
@@ -932,6 +965,7 @@ export function runPrompt<
       } else {
         input.onTurnFailed?.();
       }
+      closeOpenBlocks();
       await result.finish(
         finalFinish
           ? {
@@ -1004,6 +1038,8 @@ function hasTool(input: { tools: ToolSet; toolName: string }): boolean {
 async function maybeExecuteHostTool<TOOLS extends ToolSet>(input: {
   event: { toolCallId: string; toolName: string; input: string };
   tools: TOOLS;
+  /** Per-tool context map, keyed by tool name (see `runPrompt`'s input). */
+  toolsContext: InferToolSetContext<TOOLS> | undefined;
   wrappedExecuteTool: TurnTelemetry['executeTool'];
   sandboxSession: SandboxSession;
   abortSignal: AbortSignal | undefined;
@@ -1021,6 +1057,20 @@ async function maybeExecuteHostTool<TOOLS extends ToolSet>(input: {
 
   const parsed = await safeParseJSON({ text: input.event.input });
   const args = parsed.success ? parsed.value : input.event.input;
+
+  /*
+   * Validate the caller-supplied context against the tool's own
+   * `contextSchema`, exactly as `generateText`/`streamText` do before calling
+   * a tool. Tools without a schema keep receiving whatever the caller mapped
+   * to their name (`undefined` when the caller passed none).
+   */
+  const context = await validateToolContext({
+    toolName: input.event.toolName,
+    context: (input.toolsContext as Record<string, unknown> | undefined)?.[
+      input.event.toolName
+    ],
+    contextSchema: tool.contextSchema,
+  });
 
   try {
     /*
@@ -1044,7 +1094,7 @@ async function maybeExecuteHostTool<TOOLS extends ToolSet>(input: {
             toolCallId: input.event.toolCallId,
             messages: [],
             abortSignal: input.abortSignal,
-            context: undefined as never,
+            context: context as never,
             experimental_sandbox: input.sandboxSession,
           },
         });

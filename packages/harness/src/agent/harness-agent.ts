@@ -10,6 +10,7 @@ import {
   asSchema,
   generateId,
   type Context,
+  type InferToolSetContext,
   type ModelMessage,
   type ToolSet,
 } from '@ai-sdk/provider-utils';
@@ -73,12 +74,23 @@ export type { HarnessAllTools } from './harness-agent-tool-types';
  * `HarnessAgentSession` the caller passes in — it owns no session
  * state of its own.
  */
-export interface HarnessAgentCallExtensions {
+export interface HarnessAgentCallExtensions<TOOLS extends ToolSet = ToolSet> {
   /**
    * Active session returned by `agent.createSession(...)`. Drives the
    * underlying harness adapter for this turn.
    */
   session: HarnessAgentSession;
+
+  /**
+   * Per-tool context, keyed by tool name. Each host tool's entry is validated
+   * against that tool's `contextSchema` and passed to its `execute()` as the
+   * `context` option — the same contract as `generateText` / `streamText`.
+   *
+   * Context is per call, so request-scoped values (the acting user, a tenant,
+   * a turn id) belong here rather than in the tool closure. Only host tools
+   * receive it; adapter builtins run inside the runtime and have no context.
+   */
+  toolsContext?: InferToolSetContext<TOOLS>;
 }
 
 /**
@@ -394,7 +406,7 @@ export class HarnessAgent<
       HarnessAllTools<THarness, TUserTools>,
       RUNTIME_CONTEXT
     > &
-      HarnessAgentCallExtensions,
+      HarnessAgentCallExtensions<HarnessAllTools<THarness, TUserTools>>,
   ): Promise<
     GenerateTextResult<
       HarnessAllTools<THarness, TUserTools>,
@@ -403,11 +415,10 @@ export class HarnessAgent<
     >
   > {
     const turnInput = this._resolveTurnInput(options);
-    const runtimeContext = {} as RUNTIME_CONTEXT;
     const { result, done } = this._startTurn({
       session: options.session,
       turnInput,
-      runtimeContext,
+      toolsContext: options.toolsContext,
       abortSignal: options.abortSignal,
     });
     await done;
@@ -420,7 +431,7 @@ export class HarnessAgent<
       HarnessAllTools<THarness, TUserTools>,
       RUNTIME_CONTEXT
     > &
-      HarnessAgentCallExtensions,
+      HarnessAgentCallExtensions<HarnessAllTools<THarness, TUserTools>>,
   ): Promise<
     StreamTextResult<
       HarnessAllTools<THarness, TUserTools>,
@@ -429,11 +440,10 @@ export class HarnessAgent<
     >
   > {
     const turnInput = this._resolveTurnInput(options);
-    const runtimeContext = {} as RUNTIME_CONTEXT;
     const { result } = this._startTurn({
       session: options.session,
       turnInput,
-      runtimeContext,
+      toolsContext: options.toolsContext,
       abortSignal: options.abortSignal,
     });
     return result;
@@ -444,20 +454,23 @@ export class HarnessAgent<
    * {@link generate}. Used after `createSession({ continueFrom })` to finish
    * consuming a turn that crossed a process boundary.
    */
-  async continueGenerate(options: {
-    session: HarnessAgentSession;
-    toolApprovalContinuations?: readonly HarnessAgentToolApprovalContinuation[];
-    toolResultContinuations?: readonly HarnessAgentToolResultContinuation[];
-    abortSignal?: AbortSignal;
-  }): Promise<
+  async continueGenerate(
+    options: {
+      session: HarnessAgentSession;
+      toolApprovalContinuations?: readonly HarnessAgentToolApprovalContinuation[];
+      toolResultContinuations?: readonly HarnessAgentToolResultContinuation[];
+      abortSignal?: AbortSignal;
+    } & Pick<
+      HarnessAgentCallExtensions<HarnessAllTools<THarness, TUserTools>>,
+      'toolsContext'
+    >,
+  ): Promise<
     GenerateTextResult<
       HarnessAllTools<THarness, TUserTools>,
       RUNTIME_CONTEXT,
       never
     >
   > {
-    const runtimeContext = {} as RUNTIME_CONTEXT;
-
     const { result, done } = this._startTurn({
       session: options.session,
       turnInput: {
@@ -465,7 +478,7 @@ export class HarnessAgent<
         toolApprovalContinuations: options.toolApprovalContinuations ?? [],
         toolResultContinuations: options.toolResultContinuations ?? [],
       },
-      runtimeContext,
+      toolsContext: options.toolsContext,
       abortSignal: options.abortSignal,
     });
     await done;
@@ -480,20 +493,23 @@ export class HarnessAgent<
    * `doContinueTurn`; what it can guarantee (lossless attach vs. lossy rerun)
    * follows from how the adapter resumed the session.
    */
-  async continueStream(options: {
-    session: HarnessAgentSession;
-    toolApprovalContinuations?: readonly HarnessAgentToolApprovalContinuation[];
-    toolResultContinuations?: readonly HarnessAgentToolResultContinuation[];
-    abortSignal?: AbortSignal;
-  }): Promise<
+  async continueStream(
+    options: {
+      session: HarnessAgentSession;
+      toolApprovalContinuations?: readonly HarnessAgentToolApprovalContinuation[];
+      toolResultContinuations?: readonly HarnessAgentToolResultContinuation[];
+      abortSignal?: AbortSignal;
+    } & Pick<
+      HarnessAgentCallExtensions<HarnessAllTools<THarness, TUserTools>>,
+      'toolsContext'
+    >,
+  ): Promise<
     StreamTextResult<
       HarnessAllTools<THarness, TUserTools>,
       RUNTIME_CONTEXT,
       never
     >
   > {
-    const runtimeContext = {} as RUNTIME_CONTEXT;
-
     const { result } = this._startTurn({
       session: options.session,
       turnInput: {
@@ -501,7 +517,7 @@ export class HarnessAgent<
         toolApprovalContinuations: options.toolApprovalContinuations ?? [],
         toolResultContinuations: options.toolResultContinuations ?? [],
       },
-      runtimeContext,
+      toolsContext: options.toolsContext,
       abortSignal: options.abortSignal,
     });
     return result;
@@ -518,7 +534,9 @@ export class HarnessAgent<
           toolApprovalContinuations: readonly HarnessAgentToolApprovalContinuation[];
           toolResultContinuations: readonly HarnessAgentToolResultContinuation[];
         };
-    runtimeContext: RUNTIME_CONTEXT;
+    toolsContext:
+      | InferToolSetContext<HarnessAllTools<THarness, TUserTools>>
+      | undefined;
     abortSignal: AbortSignal | undefined;
   }): {
     result: StreamTextResult<
@@ -528,6 +546,14 @@ export class HarnessAgent<
     >;
     done: Promise<void>;
   } {
+    /*
+     * `runtimeContext` is agent-level configuration, mirroring
+     * `ToolLoopAgentSettings.runtimeContext`: it reaches `stopWhen` conditions
+     * and every `StepResult`. Per-call, per-tool values go through
+     * `toolsContext` instead.
+     */
+    const runtimeContext =
+      this.settings.runtimeContext ?? ({} as RUNTIME_CONTEXT);
     if (input.turnInput.mode === 'continue') {
       return input.session.continueTurn<
         HarnessAllTools<THarness, TUserTools>,
@@ -538,7 +564,8 @@ export class HarnessAgent<
         activeTools: this.activeUserTools,
         toolSpecs: this._toToolSpecs(),
         builtinToolFiltering: this.builtinToolFiltering,
-        runtimeContext: input.runtimeContext,
+        runtimeContext,
+        toolsContext: input.toolsContext,
         abortSignal: input.abortSignal,
         telemetry: this.settings.telemetry,
         stopConditions: this.stopConditions,
@@ -557,7 +584,8 @@ export class HarnessAgent<
       activeTools: this.activeUserTools,
       toolSpecs: this._toToolSpecs(),
       builtinToolFiltering: this.builtinToolFiltering,
-      runtimeContext: input.runtimeContext,
+      runtimeContext,
+      toolsContext: input.toolsContext,
       abortSignal: input.abortSignal,
       telemetry: this.settings.telemetry,
       stopConditions: this.stopConditions,

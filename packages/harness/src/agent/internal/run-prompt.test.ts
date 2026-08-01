@@ -6,6 +6,7 @@ import {
 import {
   hasToolCall,
   isStepCount,
+  TypeValidationError,
   type Telemetry,
   type TextStreamPart,
 } from 'ai';
@@ -1107,6 +1108,155 @@ describe('runPrompt host tool generator results', () => {
         toolCall: expect.objectContaining({ toolCallId: 'c2' }),
       }),
     );
+  });
+
+  test('passes the caller tools context to host tool execute', async () => {
+    const seen: unknown[] = [];
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      execute: async (_args, options) => {
+        seen.push(options.context);
+        return { temperature: 72 };
+      },
+    });
+    const context = { actorId: 'user-1', turnId: 'turn-9' };
+
+    const { result, done } = runPrompt({
+      harness,
+      session: fakeSession([
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+        },
+        ...finishEvents,
+      ]),
+      prompt: 'go',
+      instructions: undefined,
+      tools: { weather } as ToolSet,
+      toolSpecs: [],
+      sandboxSession,
+      sessionWorkDir: WORK_DIR,
+      runtimeContext: {} as never,
+      toolsContext: { weather: context } as never,
+      abortSignal: undefined,
+    });
+
+    await result.consumeStream();
+    await done;
+
+    expect(seen).toEqual([context]);
+  });
+
+  test('passes the caller tools context to a host tool executed on approval', async () => {
+    const seen: unknown[] = [];
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      execute: async (_args, options) => {
+        seen.push(options.context);
+        return { temperature: 72 };
+      },
+    });
+    const context = { actorId: 'user-1' };
+
+    const { result, done } = runPrompt({
+      harness,
+      session: fakeSession([]),
+      mode: 'continue',
+      instructions: undefined,
+      tools: { weather } as ToolSet,
+      toolSpecs: [],
+      sandboxSession,
+      sessionWorkDir: WORK_DIR,
+      runtimeContext: {} as never,
+      toolsContext: { weather: context } as never,
+      abortSignal: undefined,
+      pendingToolApprovals: [
+        {
+          approvalId: 'approval-1',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+          kind: 'custom',
+          providerExecuted: false,
+        },
+      ],
+      toolApprovalContinuations: [
+        {
+          approvalResponse: {
+            type: 'tool-approval-response',
+            approvalId: 'approval-1',
+            approved: true,
+          },
+          toolCall: {
+            type: 'tool-call',
+            toolCallId: 'c1',
+            toolName: 'weather',
+            input: { city: 'SF' },
+            providerExecuted: false,
+          },
+        },
+      ],
+    });
+
+    await result.consumeStream();
+    await done;
+
+    expect(seen).toEqual([context]);
+  });
+
+  test('validates the tools context against the tool context schema', async () => {
+    let executed = false;
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      contextSchema: z.object({ actorId: z.string() }),
+      execute: async () => {
+        executed = true;
+        return { temperature: 72 };
+      },
+    });
+
+    const { result, done } = runPrompt({
+      harness,
+      session: fakeSession([
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+        },
+        ...finishEvents,
+      ]),
+      prompt: 'go',
+      instructions: undefined,
+      tools: { weather } as ToolSet,
+      toolSpecs: [],
+      sandboxSession,
+      sessionWorkDir: WORK_DIR,
+      runtimeContext: {} as never,
+      toolsContext: { weather: { actorId: 42 } } as never,
+      abortSignal: undefined,
+    });
+
+    const parts: TextStreamPart<ToolSet>[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+    await done;
+
+    /*
+     * A context that does not match the schema is a caller bug, not a model
+     * one: the tool never runs and the turn fails, matching `generateText`,
+     * where `executeToolCall` throws `TypeValidationError` rather than
+     * reporting a tool error to the model.
+     */
+    expect(executed).toBe(false);
+    const errorPart = parts.find(part => part.type === 'error') as
+      | Extract<TextStreamPart<ToolSet>, { type: 'error' }>
+      | undefined;
+    expect(TypeValidationError.isInstance(errorPart?.error)).toBe(true);
   });
 
   test('surfaces each generator yield as a preliminary result and submits the last yield', async () => {

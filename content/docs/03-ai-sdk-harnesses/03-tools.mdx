@@ -202,6 +202,48 @@ const inspectFile = tool({
 });
 ```
 
+## Tool Context
+
+Host-executed tools receive per-call context through `toolsContext`, the same
+option `generateText` and `streamText` take. Give the tool a `contextSchema`,
+then pass a value for it on each `generate` / `stream` call:
+
+```ts
+const readRecord = tool({
+  description: 'Read a record the current user may see.',
+  inputSchema: z.object({ recordId: z.string() }),
+  contextSchema: z.object({ actorId: z.string() }),
+  execute: async ({ recordId }, { context }) => {
+    return await loadRecordFor(context.actorId, recordId);
+  },
+});
+
+const agent = new HarnessAgent({
+  harness: claudeCode,
+  sandbox: createVercelSandbox({ runtime: 'node24' }),
+  tools: { readRecord },
+});
+
+const result = await agent.stream({
+  session,
+  prompt: 'Show me record 42',
+  toolsContext: { readRecord: { actorId: currentUser.id } },
+});
+```
+
+Because the value travels with the call, request-scoped data — the acting user,
+a tenant, a turn id — reaches `execute()` without being captured in the tool
+closure, and the same agent instance can serve concurrent requests. Context is
+validated against `contextSchema` before the tool runs; a value that does not
+match fails the call.
+
+`toolsContext` applies to host-executed tools. Adapter built-in tools run inside
+the runtime and receive no context.
+
+For values that belong to the agent rather than the call — and that
+`stopWhen` conditions and `StepResult.runtimeContext` should see — use
+`runtimeContext` in the agent settings instead.
+
 ## Tool Approvals
 
 Harnesses distinguish built-in tool permissions from host-executed tool

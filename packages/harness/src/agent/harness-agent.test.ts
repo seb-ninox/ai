@@ -13,7 +13,12 @@ import type {
   HarnessV1ToolSpec,
 } from '../v1';
 import { tool } from '@ai-sdk/provider-utils';
-import { isStepCount, NoSuchToolError } from 'ai';
+import {
+  isStepCount,
+  NoSuchToolError,
+  readUIMessageStream,
+  type UIMessage,
+} from 'ai';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod/v4';
 import { HarnessAgent } from './harness-agent';
@@ -1004,10 +1009,15 @@ describe('HarnessAgent', () => {
         isError: undefined,
       },
     ]);
+    // The runtime resumes a text block it opened before the pause, so the
+    // continuation only carries deltas. The stream must still be
+    // self-contained — a bare delta throws in `toUIMessageStream`.
     expect(continuedPartTypes).toEqual([
       'start',
       'start-step',
+      'text-start',
       'text-delta',
+      'text-end',
       'finish-step',
       'finish',
     ]);
@@ -1217,8 +1227,7 @@ describe('HarnessAgent', () => {
     const session = await agent.createSession({ sessionId: 's1' });
 
     expect(run).toHaveBeenCalledWith({
-      command: 'mkdir -p "$WORK_DIR"',
-      env: { WORK_DIR: '/work/mock-s1' },
+      command: "mkdir -p '/work/mock-s1'",
       abortSignal: undefined,
     });
     expect(onSandboxSession).toHaveBeenCalledWith({
@@ -1792,6 +1801,204 @@ describe('HarnessAgent', () => {
         reason:
           "Tool 'bash' is inactive due to the HarnessAgent tool filtering policy.",
       },
+    ]);
+    await session.destroy();
+  });
+
+  test('keeps both sides of an approval pause renderable when a text block spans it', async () => {
+    /*
+     * A runtime that keeps its native turn alive across the pause (Pi does)
+     * opens a text block before the approval and resumes it with a bare delta
+     * on the continuation. Message assembly is per result, so an unmatched
+     * delta used to abort the continuation with a `UIMessageStreamError`.
+     */
+    const { harness } = mockHarness({
+      script: () => [
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'Let me check ' },
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+        },
+      ],
+      continueScript: () => [
+        { type: 'text-delta', id: 't1', delta: 'the forecast.' },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          usage: zeroUsage(),
+        },
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          totalUsage: zeroUsage(),
+        },
+      ],
+    });
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      execute: async ({ city }: { city: string }) => ({ city, celsius: 19 }),
+    });
+    const agent = new HarnessAgent({
+      harness,
+      tools: { weather },
+      toolApproval: { weather: 'user-approval' },
+      sandbox: makeSandboxProvider(),
+    });
+    const session = await agent.createSession();
+
+    const paused = await agent.stream({ session, prompt: 'go' });
+    const pausedErrors: unknown[] = [];
+    let pausedMessage: UIMessage | undefined;
+    for await (const message of readUIMessageStream({
+      stream: paused.toUIMessageStream(),
+      onError: error => pausedErrors.push(error),
+    })) {
+      pausedMessage = message;
+    }
+    const approvalRequest = (await paused.content).find(
+      part => part.type === 'tool-approval-request',
+    ) as { approvalId: string } | undefined;
+
+    // The paused message closes the block it opened rather than leaving a text
+    // part stuck in `streaming` forever.
+    expect(pausedErrors).toEqual([]);
+    expect(pausedMessage?.parts).toContainEqual({
+      type: 'text',
+      text: 'Let me check ',
+      state: 'done',
+      providerMetadata: undefined,
+    });
+
+    const continued = await agent.continueStream({
+      session,
+      toolApprovalContinuations: [
+        {
+          approvalResponse: {
+            type: 'tool-approval-response',
+            approvalId: approvalRequest!.approvalId,
+            approved: true,
+          },
+          toolCall: {
+            type: 'tool-call',
+            toolCallId: 'c1',
+            toolName: 'weather',
+            input: { city: 'SF' },
+            providerExecuted: false,
+          },
+        },
+      ],
+    });
+    /*
+     * Assemble the continuation onto the paused message, the way a client
+     * resuming the same assistant turn does. Without a `text-start` in this
+     * result, `processUIMessageStream` rejects the resumed delta with a
+     * `UIMessageStreamError` and the rest of the turn is lost.
+     */
+    const continuedErrors: unknown[] = [];
+    let continuedMessage: UIMessage | undefined;
+    for await (const message of readUIMessageStream({
+      message: pausedMessage,
+      stream: continued.toUIMessageStream(),
+      onError: error => continuedErrors.push(error),
+    })) {
+      continuedMessage = message;
+    }
+
+    expect(continuedErrors).toEqual([]);
+    expect(continuedMessage?.parts).toContainEqual(
+      expect.objectContaining({ type: 'text', text: 'the forecast.' }),
+    );
+    await session.destroy();
+  });
+
+  test('passes the per-call toolsContext to host tool execute', async () => {
+    const seen: unknown[] = [];
+    const { harness } = mockHarness({
+      script: () => [
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          usage: zeroUsage(),
+        },
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          totalUsage: zeroUsage(),
+        },
+      ],
+    });
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      contextSchema: z.object({ actorId: z.string() }),
+      execute: async (_args, options) => {
+        seen.push(options.context);
+        return { temperature: 72 };
+      },
+    });
+    const agent = new HarnessAgent({
+      harness,
+      tools: { weather },
+      sandbox: makeSandboxProvider(),
+    });
+    const session = await agent.createSession();
+
+    await agent.generate({
+      session,
+      prompt: 'go',
+      toolsContext: { weather: { actorId: 'user-1' } },
+    });
+
+    // Request-scoped values reach `execute` through the call, not the closure.
+    expect(seen).toEqual([{ actorId: 'user-1' }]);
+    await session.destroy();
+  });
+
+  test('passes settings.runtimeContext to stop conditions and step results', async () => {
+    const seen: unknown[] = [];
+    const { harness } = mockHarness({
+      script: () => [
+        { type: 'text-start', id: 't1' },
+        { type: 'text-delta', id: 't1', delta: 'done' },
+        { type: 'text-end', id: 't1' },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          usage: zeroUsage(),
+        },
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'end_turn' },
+          totalUsage: zeroUsage(),
+        },
+      ],
+    });
+    const runtimeContext = { tenant: 'acme' };
+    const agent = new HarnessAgent({
+      harness,
+      sandbox: makeSandboxProvider(),
+      runtimeContext,
+      stopWhen: ({ steps }) => {
+        seen.push(steps.at(-1)?.runtimeContext);
+        return false;
+      },
+    });
+    const session = await agent.createSession();
+
+    const result = await agent.generate({ session, prompt: 'go' });
+
+    expect(result.steps.map(step => step.runtimeContext)).toEqual([
+      runtimeContext,
     ]);
     await session.destroy();
   });

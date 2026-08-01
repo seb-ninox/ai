@@ -375,11 +375,17 @@ console.log(preparation.identity);
 - `skills`: instruction bundles surfaced by the adapter.
 - `permissionMode`: built-in tool permission mode.
 - `toolApproval`: approval status map for host-executed tools.
+- `runtimeContext`: agent-level context passed to `stopWhen` conditions and
+  every `StepResult.runtimeContext`.
 - `sandboxConfig`: sandbox working-directory and lifecycle hook configuration.
 - `telemetry`, `debug`, and `onLog`: observability and diagnostics.
 
 Adapter-specific settings belong on the adapter factory, for example
 `createCodex({ reasoningEffort: 'high' })`.
+
+Per-call options — the prompt, `abortSignal`, the `session`, and
+[`toolsContext`](/docs/ai-sdk-harnesses/tools#tool-context) — belong on
+`generate` / `stream` rather than here.
 
 ## Next Steps
 

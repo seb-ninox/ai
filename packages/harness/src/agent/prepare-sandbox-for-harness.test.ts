@@ -94,7 +94,7 @@ describe('prepareSandboxForHarness', () => {
       'echo alpha',
       'echo beta',
       'pwd',
-      'mkdir -p "$WORK_DIR"',
+      "mkdir -p '/work/repo'",
     ]);
     expect(onBootstrap).toHaveBeenCalledWith({
       session,

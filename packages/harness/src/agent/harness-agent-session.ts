@@ -1,4 +1,8 @@
-import type { Context, ToolSet } from '@ai-sdk/provider-utils';
+import type {
+  Context,
+  InferToolSetContext,
+  ToolSet,
+} from '@ai-sdk/provider-utils';
 import type { StopCondition, StreamTextResult, TelemetryOptions } from 'ai';
 import type { HarnessAgentToolApprovalConfiguration } from './harness-agent-settings';
 import type {
@@ -165,6 +169,7 @@ export class HarnessAgentSession {
     toolSpecs: HarnessAgentToolSpec[];
     builtinToolFiltering: HarnessV1BuiltinToolFiltering | undefined;
     runtimeContext: RUNTIME_CONTEXT;
+    toolsContext: InferToolSetContext<TOOLS> | undefined;
     abortSignal: AbortSignal | undefined;
     telemetry: TelemetryOptions | undefined;
     stopConditions: ReadonlyArray<StopCondition<TOOLS, RUNTIME_CONTEXT>>;
@@ -186,6 +191,7 @@ export class HarnessAgentSession {
         sandboxSession: sandboxSession.restricted(),
         sessionWorkDir: this.sessionWorkDir,
         runtimeContext: options.runtimeContext,
+        toolsContext: options.toolsContext,
         abortSignal: options.abortSignal,
         telemetry: options.telemetry,
         stopConditions: options.stopConditions,
@@ -234,6 +240,7 @@ export class HarnessAgentSession {
     toolSpecs: HarnessAgentToolSpec[];
     builtinToolFiltering: HarnessV1BuiltinToolFiltering | undefined;
     runtimeContext: RUNTIME_CONTEXT;
+    toolsContext: InferToolSetContext<TOOLS> | undefined;
     abortSignal: AbortSignal | undefined;
     telemetry: TelemetryOptions | undefined;
     stopConditions: ReadonlyArray<StopCondition<TOOLS, RUNTIME_CONTEXT>>;
@@ -261,6 +268,7 @@ export class HarnessAgentSession {
         sandboxSession: sandboxSession.restricted(),
         sessionWorkDir: this.sessionWorkDir,
         runtimeContext: options.runtimeContext,
+        toolsContext: options.toolsContext,
         abortSignal: options.abortSignal,
         telemetry: options.telemetry,
         stopConditions: options.stopConditions,

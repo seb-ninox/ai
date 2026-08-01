@@ -1,5 +1,23 @@
 # @ai-sdk/openai
 
+## 4.0.27
+
+### Patch Changes
+
+- 5fc7da5: chore: centralize empty language model usage creation in provider utilities.
+- 93b2acd: chore: centralize response metadata conversion
+- Updated dependencies [5fc7da5]
+- Updated dependencies [93b2acd]
+  - @ai-sdk/provider-utils@5.0.18
+
+## 4.0.26
+
+### Patch Changes
+
+- f7c4a38: Serialize file upload expiry settings in the multipart field shape accepted by OpenAI.
+- Updated dependencies [fa95504]
+  - @ai-sdk/provider-utils@5.0.17
+
 ## 4.0.25
 
 ### Patch Changes

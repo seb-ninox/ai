@@ -13,8 +13,8 @@ import {
 
 const recipe: HarnessV1Bootstrap = {
   harnessId: 'demo',
-  bootstrapDir: '/tmp/harness/demo',
-  files: [{ path: '/tmp/harness/demo/a.txt', content: 'one' }],
+  bootstrapDir: '.harness-bootstrap/demo',
+  files: [{ path: '.harness-bootstrap/demo/a.txt', content: 'one' }],
   commands: [{ command: 'echo ok' }],
 };
 
@@ -24,12 +24,14 @@ function makeSession(): {
   readTextFile: ReturnType<typeof vi.fn>;
   writeTextFile: ReturnType<typeof vi.fn>;
 } {
-  const run = vi.fn(async (args: { command: string }) => {
-    if (args.command === 'pwd') {
-      return { exitCode: 0, stdout: '/work\n', stderr: '' };
-    }
-    return { exitCode: 0, stdout: '', stderr: '' };
-  });
+  const run = vi.fn(
+    async (args: { command: string; workingDirectory?: string }) => {
+      if (args.command === 'pwd') {
+        return { exitCode: 0, stdout: '/work\n', stderr: '' };
+      }
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+  );
   const readTextFile = vi.fn(async () => null);
   const writeTextFile = vi.fn(async () => {});
   return {
@@ -185,7 +187,7 @@ describe('ensureSandboxDirectory', () => {
 
 describe('runSandboxBootstrap', () => {
   it('runs built-in bootstrap before caller bootstrap', async () => {
-    const { session, run } = makeSession();
+    const { session, run, readTextFile, writeTextFile } = makeSession();
     const onSandboxBootstrap = vi.fn(async () => {});
     const recipeIdentity = await hashHarnessBootstrap(recipe);
 
@@ -203,11 +205,23 @@ describe('runSandboxBootstrap', () => {
       abortSignal: undefined,
     });
     expect(run.mock.calls.map(([args]) => args.command)).toEqual([
-      'echo ok',
       'pwd',
+      "mkdir -p '/work/.harness-bootstrap/demo'",
+      'echo ok',
       "mkdir -p '/work/ai-sdk'",
     ]);
-    expect(run.mock.invocationCallOrder[0]!).toBeLessThan(
+    expect(readTextFile).toHaveBeenCalledWith({
+      path: expect.stringMatching(
+        /^\/work\/\.harness-bootstrap\/demo\/\.bootstrap-[0-9a-f]{16}\.ok$/,
+      ),
+      abortSignal: undefined,
+    });
+    expect(writeTextFile).toHaveBeenCalledWith({
+      path: '/work/.harness-bootstrap/demo/a.txt',
+      content: 'one',
+      abortSignal: undefined,
+    });
+    expect(run.mock.invocationCallOrder[2]!).toBeLessThan(
       onSandboxBootstrap.mock.invocationCallOrder[0]!,
     );
   });

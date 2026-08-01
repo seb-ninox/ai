@@ -1,5 +1,23 @@
 # @ai-sdk/moonshotai
 
+## 3.0.23
+
+### Patch Changes
+
+- 5fc7da5: chore: centralize empty language model usage creation in provider utilities.
+- Updated dependencies [5fc7da5]
+- Updated dependencies [93b2acd]
+  - @ai-sdk/provider-utils@5.0.18
+  - @ai-sdk/openai-compatible@3.0.20
+
+## 3.0.22
+
+### Patch Changes
+
+- Updated dependencies [fa95504]
+  - @ai-sdk/provider-utils@5.0.17
+  - @ai-sdk/openai-compatible@3.0.19
+
 ## 3.0.21
 
 ### Patch Changes

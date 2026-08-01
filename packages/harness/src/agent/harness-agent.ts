@@ -322,12 +322,13 @@ export class HarnessAgent<
         sandboxBootstrapPlan.recipe != null &&
         sandboxBootstrapPlan.recipeIdentity != null
       ) {
-        await applyBootstrapRecipe(
-          sandboxSession.restricted(),
-          sandboxBootstrapPlan.recipe,
-          sandboxBootstrapPlan.recipeIdentity,
-          { abortSignal },
-        );
+        await applyBootstrapRecipe({
+          session: sandboxSession.restricted(),
+          recipe: sandboxBootstrapPlan.recipe,
+          identity: sandboxBootstrapPlan.recipeIdentity,
+          defaultWorkingDirectory: sandboxSession.defaultWorkingDirectory,
+          abortSignal,
+        });
       }
       await ensureSandboxDirectory({
         session: sandboxSession,

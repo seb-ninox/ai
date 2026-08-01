@@ -1,5 +1,21 @@
 # @ai-sdk/anthropic
 
+## 4.0.27
+
+### Patch Changes
+
+- Updated dependencies [5fc7da5]
+- Updated dependencies [93b2acd]
+  - @ai-sdk/provider-utils@5.0.18
+
+## 4.0.26
+
+### Patch Changes
+
+- dc0c28e: Return visible summarized reasoning when generic reasoning enables adaptive thinking.
+- Updated dependencies [fa95504]
+  - @ai-sdk/provider-utils@5.0.17
+
 ## 4.0.25
 
 ### Patch Changes

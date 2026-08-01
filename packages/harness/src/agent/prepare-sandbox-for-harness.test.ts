@@ -7,10 +7,10 @@ import { prepareSandboxForHarness } from './prepare-sandbox-for-harness';
 function makeRecipe(harnessId: string): HarnessV1Bootstrap {
   return {
     harnessId,
-    bootstrapDir: `/tmp/harness/${harnessId}`,
+    bootstrapDir: `.harness-bootstrap/${harnessId}`,
     files: [
       {
-        path: `/tmp/harness/${harnessId}/file.txt`,
+        path: `.harness-bootstrap/${harnessId}/file.txt`,
         content: harnessId,
       },
     ],
@@ -91,9 +91,11 @@ describe('prepareSandboxForHarness', () => {
       skippedHarnessIds: [],
     });
     expect(run.mock.calls.map(([args]) => args.command)).toEqual([
-      'echo alpha',
-      'echo beta',
       'pwd',
+      "mkdir -p '/work/.harness-bootstrap/alpha'",
+      'echo alpha',
+      "mkdir -p '/work/.harness-bootstrap/beta'",
+      'echo beta',
       "mkdir -p '/work/repo'",
     ]);
     expect(onBootstrap).toHaveBeenCalledWith({

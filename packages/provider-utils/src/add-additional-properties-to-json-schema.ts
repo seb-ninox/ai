@@ -10,7 +10,10 @@ export function addAdditionalPropertiesToJsonSchema(
     jsonSchema.type === 'object' ||
     (Array.isArray(jsonSchema.type) && jsonSchema.type.includes('object'))
   ) {
-    jsonSchema.additionalProperties = false;
+    jsonSchema.additionalProperties =
+      typeof jsonSchema.additionalProperties === 'object'
+        ? visit(jsonSchema.additionalProperties)
+        : false;
     const { properties } = jsonSchema;
     if (properties != null) {
       for (const key of Object.keys(properties)) {

@@ -303,6 +303,225 @@ describe('createPiSession', () => {
     });
   });
 
+  /*
+   * Cross-process continuation of a turn parked on host input: the parked live
+   * session is gone and Pi never re-drives a recorded call after a journal
+   * rebuild, so `doContinueTurn` must hold the rerun until the host settles the
+   * recorded calls, write each outcome into the rebuilt context, and only then
+   * re-drive. Without that, the rerun ships a context whose dangling call gets
+   * a synthetic "No result provided" error and the model retries an
+   * already-applied call.
+   */
+  it('injects host outcomes into the rebuilt context before re-driving a parked continuation', async () => {
+    const stateMessages: Array<Record<string, unknown>> = [
+      {
+        role: 'user',
+        content: [{ type: 'text', text: 'insert the rows' }],
+        timestamp: 1,
+      },
+      {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [
+          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
+        ],
+        timestamp: 2,
+      },
+    ];
+    const appendMessage = vi.fn();
+    const prompt = vi.fn(async () => {});
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      agent: { state: { messages: stateMessages } },
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      messages: stateMessages,
+      prompt,
+      sessionManager: { appendMessage },
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-inject-outcome',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+      pendingHostToolCalls: [
+        {
+          toolCallId: 'tool-1',
+          toolName: 'applyChanges',
+          input: '{"op":"insert"}',
+        },
+      ],
+    });
+
+    const emit = vi.fn();
+    const control = await session.doContinueTurn({
+      tools: [{ name: 'applyChanges' }] satisfies HarnessV1ToolSpec[],
+      emit,
+    });
+
+    // The recorded call is replayed so the framework can settle it against
+    // its continuations (or re-emit its approval request).
+    expect(emit).toHaveBeenCalledWith({
+      type: 'tool-call',
+      toolCallId: 'tool-1',
+      toolName: 'applyChanges',
+      input: '{"op":"insert"}',
+      providerExecuted: false,
+    });
+    // The rerun is held until the host settles the recorded call.
+    expect(prompt).not.toHaveBeenCalled();
+
+    await control.submitToolResult({
+      toolCallId: 'tool-1',
+      output: { applied: true, revision: 42 },
+    });
+    await control.done;
+
+    const injected = stateMessages.at(-1);
+    expect(injected).toMatchObject({
+      role: 'toolResult',
+      toolCallId: 'tool-1',
+      toolName: 'applyChanges',
+      content: [{ type: 'text', text: '{"applied":true,"revision":42}' }],
+      isError: false,
+    });
+    expect(appendMessage).toHaveBeenCalledWith(injected);
+    // The outcome landed in the context (state + journal) before the rerun.
+    expect(appendMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      prompt.mock.invocationCallOrder[0]!,
+    );
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledWith('');
+  });
+
+  it('keeps the continuation parked until every recorded call is settled', async () => {
+    const stateMessages: Array<Record<string, unknown>> = [
+      {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [
+          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
+          { type: 'toolCall', id: 'tool-2', name: 'applyChanges', arguments: {} },
+        ],
+        timestamp: 1,
+      },
+    ];
+    const prompt = vi.fn(async () => {});
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      agent: { state: { messages: stateMessages } },
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      messages: stateMessages,
+      prompt,
+      sessionManager: { appendMessage: vi.fn() },
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-partial-settle',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+      pendingHostToolCalls: [
+        { toolCallId: 'tool-1', toolName: 'applyChanges', input: '{}' },
+        { toolCallId: 'tool-2', toolName: 'applyChanges', input: '{}' },
+      ],
+    });
+
+    const control = await session.doContinueTurn({
+      tools: [{ name: 'applyChanges' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+
+    await control.submitToolResult({ toolCallId: 'tool-1', output: 'ok' });
+    expect(prompt).not.toHaveBeenCalled();
+
+    await control.submitToolResult({ toolCallId: 'tool-2', output: 'ok' });
+    await control.done;
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(
+      stateMessages.filter(message => message['role'] === 'toolResult'),
+    ).toHaveLength(2);
+  });
+
+  it('does not hold the continuation for calls the journal already answers', async () => {
+    const stateMessages: Array<Record<string, unknown>> = [
+      {
+        role: 'assistant',
+        stopReason: 'toolUse',
+        content: [
+          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
+        ],
+        timestamp: 1,
+      },
+      {
+        role: 'toolResult',
+        toolCallId: 'tool-1',
+        toolName: 'applyChanges',
+        content: [{ type: 'text', text: '{"applied":true}' }],
+        isError: false,
+        timestamp: 2,
+      },
+    ];
+    const appendMessage = vi.fn();
+    const prompt = vi.fn(async () => {});
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      agent: { state: { messages: stateMessages } },
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      messages: stateMessages,
+      prompt,
+      sessionManager: { appendMessage },
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-already-answered',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+      pendingHostToolCalls: [
+        { toolCallId: 'tool-1', toolName: 'applyChanges', input: '{}' },
+      ],
+    });
+
+    const control = await session.doContinueTurn({
+      tools: [{ name: 'applyChanges' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+    await control.done;
+
+    // Injecting again would put a duplicate result into the provider payload.
+    expect(appendMessage).not.toHaveBeenCalled();
+    expect(prompt).toHaveBeenCalledTimes(1);
+    expect(prompt).toHaveBeenCalledWith('');
+  });
+
   it('closes the open step before terminal finish when prompt resolves without turn_end', async () => {
     const listeners: Array<(raw: unknown) => void> = [];
     const prompt = vi.fn(async () => {

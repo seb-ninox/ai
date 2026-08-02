@@ -195,6 +195,26 @@ export interface PiSessionSettings {
   readonly thinkingLevel?: PiThinkingLevel;
 }
 
+/**
+ * A custom (host-executed) tool call that was still waiting on host input —
+ * an approval decision or the executed result — when its turn was parked.
+ *
+ * On a cross-process continuation the parked live session (and with it the
+ * call's promise waiter) is gone. Pi never re-drives a recorded call after a
+ * journal rebuild, so without these records `doContinueTurn` would rerun the
+ * model on a context whose dangling call gets patched with a synthetic
+ * `"No result provided"` error (see pi-ai's `transformMessages`) — the model
+ * then retries a call whose effect may already be applied. `doContinueTurn`
+ * instead holds the turn until the host submits each recorded call's outcome,
+ * writes those outcomes into the session context, and only then re-drives.
+ */
+export interface PiPendingHostToolCall {
+  readonly toolCallId: string;
+  readonly toolName: string;
+  /** JSON-encoded tool input, as recorded by the framework's pending records. */
+  readonly input: string;
+}
+
 export interface CreatePiSessionInput {
   readonly sessionId: string;
   readonly sandboxSession: HarnessV1NetworkSandboxSession;
@@ -206,6 +226,12 @@ export interface CreatePiSessionInput {
   readonly permissionMode?: HarnessV1PermissionMode;
   readonly builtinToolFiltering?: HarnessV1BuiltinToolFiltering;
   readonly resumeSessionFileName?: string;
+  /**
+   * Host tool calls the parked turn was waiting on when its lifecycle state
+   * was captured. Only meaningful together with `isResume`; consumed by
+   * `doContinueTurn`.
+   */
+  readonly pendingHostToolCalls?: ReadonlyArray<PiPendingHostToolCall>;
   readonly abortSignal?: AbortSignal;
   /**
    * Directory holding Pi's global agent config (auth.json, models.json,
@@ -234,6 +260,14 @@ interface ActivePiTurn {
   readonly token: object;
   readonly done: Promise<void>;
 }
+
+/*
+ * Pi's message types, derived from the `AgentSession` surface instead of
+ * imported: `@earendil-works/pi-agent-core` / `pi-ai` are transitive
+ * dependencies this package deliberately does not declare.
+ */
+type PiAgentMessage = AgentSession['messages'][number];
+type PiToolResultMessage = Extract<PiAgentMessage, { role: 'toolResult' }>;
 
 export async function createPiSession(
   input: CreatePiSessionInput,
@@ -444,6 +478,26 @@ export async function createPiSession(
    */
   const earlyToolResults = new Map<string, unknown>();
   const earlyToolApprovals = new Map<string, ToolApprovalDecision>();
+  /*
+   * Recorded host tool calls a cross-process continuation must settle before
+   * the model turn may run (see `PiPendingHostToolCall`). Entries are removed
+   * as outcomes are injected into the session context; while any remain, the
+   * turn stays parked on host input.
+   */
+  const awaitingHostToolCalls = new Map<string, PiPendingHostToolCall>(
+    (input.isResume ? (input.pendingHostToolCalls ?? []) : []).map(call => [
+      call.toolCallId,
+      call,
+    ]),
+  );
+  /*
+   * The one live deferred continuation (a `doContinueTurn` parked on
+   * `awaitingHostToolCalls`). Lifecycle methods settle it so its stream
+   * closes; a newer deferred continuation supersedes it.
+   */
+  let deferredContinuation:
+    | { resolve: () => void; reject: (error: unknown) => void }
+    | undefined;
 
   // Emit channel set at the start of every doPromptTurn and cleared on end.
   let currentEmit: ((part: HarnessV1StreamPart) => void) | undefined;
@@ -496,6 +550,109 @@ export async function createPiSession(
     });
   }
 
+  function deliverHostToolResult(args: {
+    toolCallId: string;
+    output: unknown;
+  }): void {
+    /*
+     * Preserve the original output so the result projection can surface it
+     * unchanged. The tool handler stringifies the output for the runtime
+     * (so the model reads it), and Pi echoes that text back — without this
+     * the consumer-facing result would be the serialized string instead of
+     * the original object. Recorded before the waiter lookup because it is
+     * needed either way: an outcome that lands ahead of Pi is consumed by
+     * the tool handler later, and the projection still has to un-stringify
+     * it when the matching result event arrives.
+     */
+    translatorState?.hostToolResults.set(args.toolCallId, args.output);
+    const pending = pendingToolResults.get(args.toolCallId);
+    if (!pending) {
+      earlyToolResults.set(args.toolCallId, args.output);
+      return;
+    }
+    pendingToolResults.delete(args.toolCallId);
+    pending.resolve(args.output);
+  }
+
+  function deliverHostToolApproval(args: {
+    approvalId: string;
+    approved: boolean;
+    reason?: string;
+  }): void {
+    const pending = pendingToolApprovals.get(args.approvalId);
+    if (!pending) {
+      earlyToolApprovals.set(args.approvalId, {
+        approved: args.approved,
+        reason: args.reason,
+      });
+      return;
+    }
+    pendingToolApprovals.delete(args.approvalId);
+    pending.resolve({
+      approved: args.approved,
+      reason: args.reason,
+    });
+  }
+
+  /**
+   * Where `toolCallId` stands in the rebuilt session context: recorded on a
+   * live (non-errored) assistant message and still unanswered (`dangling`),
+   * already answered (`resolved`), or not in the context at all (`absent`).
+   *
+   * Errored/aborted assistant messages don't count as recording the call:
+   * `transformMessages` drops them from the replayed LLM context entirely, so
+   * a result injected for such a call would reach the provider without its
+   * matching tool call.
+   */
+  function classifyHostToolCall(
+    toolCallId: string,
+  ): 'dangling' | 'resolved' | 'absent' {
+    if (piSession == null) return 'absent';
+    let recorded = false;
+    for (const message of piSession.messages) {
+      if (message.role === 'toolResult' && message.toolCallId === toolCallId) {
+        return 'resolved';
+      }
+      if (message.role !== 'assistant') continue;
+      if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+        continue;
+      }
+      for (const block of message.content) {
+        if (block.type === 'toolCall' && block.id === toolCallId) {
+          recorded = true;
+        }
+      }
+    }
+    return recorded ? 'dangling' : 'absent';
+  }
+
+  /**
+   * Write a host-submitted outcome into the session context, exactly where the
+   * in-process turn would have put it had the call's waiter survived: the same
+   * dual write Pi performs when a tool settles (the live context array feeds
+   * the next LLM call; the session manager persists the journal entry).
+   */
+  function injectHostToolResult(args: {
+    toolCallId: string;
+    toolName: string;
+    output: unknown;
+    isError?: boolean;
+  }): void {
+    const session = piSession;
+    if (session == null) return;
+    const message: PiToolResultMessage = {
+      role: 'toolResult',
+      toolCallId: args.toolCallId,
+      toolName: args.toolName,
+      content: [{ type: 'text', text: serializeToolOutput(args.output) }],
+      details: undefined,
+      isError: args.isError === true,
+      timestamp: Date.now(),
+    };
+    session.agent.state.messages.push(message);
+    session.sessionManager.appendMessage(message);
+  }
+
   function createPromptControl(input: {
     done: Promise<void>;
     abortSignal?: AbortSignal;
@@ -519,39 +676,10 @@ export async function createPiSession(
 
     return {
       async submitToolResult(args) {
-        /*
-         * Preserve the original output so the result projection can surface it
-         * unchanged. The tool handler stringifies the output for the runtime
-         * (so the model reads it), and Pi echoes that text back — without this
-         * the consumer-facing result would be the serialized string instead of
-         * the original object. Recorded before the waiter lookup because it is
-         * needed either way: an outcome that lands ahead of Pi is consumed by
-         * the tool handler later, and the projection still has to un-stringify
-         * it when the matching result event arrives.
-         */
-        translatorState?.hostToolResults.set(args.toolCallId, args.output);
-        const pending = pendingToolResults.get(args.toolCallId);
-        if (!pending) {
-          earlyToolResults.set(args.toolCallId, args.output);
-          return;
-        }
-        pendingToolResults.delete(args.toolCallId);
-        pending.resolve(args.output);
+        deliverHostToolResult(args);
       },
       async submitToolApproval(args) {
-        const pending = pendingToolApprovals.get(args.approvalId);
-        if (!pending) {
-          earlyToolApprovals.set(args.approvalId, {
-            approved: args.approved,
-            reason: args.reason,
-          });
-          return;
-        }
-        pendingToolApprovals.delete(args.approvalId);
-        pending.resolve({
-          approved: args.approved,
-          reason: args.reason,
-        });
+        deliverHostToolApproval(args);
       },
       async submitUserMessage(text) {
         await piSession?.steer(text);
@@ -843,12 +971,169 @@ export async function createPiSession(
     });
   }
 
+  /*
+   * Cross-process continuation of a turn parked on host input. The parked live
+   * session — and with it the recorded call's promise waiter — is gone, and Pi
+   * does not re-drive recorded calls after a journal rebuild: a plain rerun
+   * (`prompt('')`) would hand the model a context whose dangling call
+   * `transformMessages` patches with a synthetic `"No result provided"` error,
+   * so the model retries a call whose effect is already applied.
+   *
+   * Hold the model turn instead: the host's continuations arrive through
+   * `submitToolResult`, each outcome is written into the session context where
+   * the in-process turn would have put it, and the turn re-drives only once no
+   * recorded call is left unanswered. The recorded calls are also replayed as
+   * `tool-call` parts so the framework can settle the decided ones and re-emit
+   * an approval request for any the host has not decided — parking the turn
+   * again instead of hanging it when a continuation batch is partial.
+   */
+  async function deferContinueTurnForHostOutcomes(
+    continueOpts: HarnessV1ContinueTurnOptions,
+  ): Promise<HarnessV1PromptControl> {
+    if (stopped) {
+      throw new Error('Pi session has been stopped.');
+    }
+
+    const userTools = continueOpts.tools ?? [];
+    const signature = JSON.stringify(userTools.map(t => t.name).sort());
+    if (piSession == null || signature !== lastToolsSignature) {
+      await rebuildPiSession(userTools, piSession == null);
+      lastToolsSignature = signature;
+    }
+
+    /*
+     * An outcome can only be attached to a call the journal recorded as
+     * unanswered. Anything else — a call missing from a stale journal copy, or
+     * one already answered by a previous partial continuation — must neither
+     * gate the turn nor be injected: a result without its call (or a duplicate
+     * result) makes the provider reject the whole request.
+     */
+    for (const toolCallId of [...awaitingHostToolCalls.keys()]) {
+      if (classifyHostToolCall(toolCallId) !== 'dangling') {
+        awaitingHostToolCalls.delete(toolCallId);
+      }
+    }
+    if (awaitingHostToolCalls.size === 0) {
+      return runTurn({
+        text: '',
+        tools: userTools,
+        emit: continueOpts.emit,
+        abortSignal: continueOpts.abortSignal,
+      });
+    }
+
+    // Only one deferred continuation can own the next turn; a superseded one
+    // (its consumer re-continued after a partial settle) closes cleanly.
+    deferredContinuation?.resolve();
+
+    let state: 'waiting' | 'running' | 'settled' = 'waiting';
+    let resolveDone!: () => void;
+    let rejectDone!: (error: unknown) => void;
+    const done = new Promise<void>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+    function onAbort(): void {
+      finish({
+        error:
+          continueOpts.abortSignal?.reason ??
+          new DOMException('Aborted', 'AbortError'),
+      });
+    }
+    function finish(outcome: { error?: unknown } = {}): void {
+      if (state === 'settled') return;
+      state = 'settled';
+      continueOpts.abortSignal?.removeEventListener('abort', onAbort);
+      if (deferredContinuation === deferred) {
+        deferredContinuation = undefined;
+      }
+      if ('error' in outcome) {
+        rejectDone(outcome.error);
+      } else {
+        resolveDone();
+      }
+    }
+    const deferred = {
+      resolve: () => finish(),
+      reject: (error: unknown) => finish({ error }),
+    };
+    deferredContinuation = deferred;
+    continueOpts.abortSignal?.addEventListener('abort', onAbort, {
+      once: true,
+    });
+
+    const startContinuationTurn = async (): Promise<void> => {
+      if (state !== 'waiting') return;
+      state = 'running';
+      try {
+        const control = await runTurn({
+          text: '',
+          tools: userTools,
+          emit: continueOpts.emit,
+          abortSignal: continueOpts.abortSignal,
+        });
+        control.done.then(
+          () => finish(),
+          (error: unknown) => finish({ error }),
+        );
+      } catch (error) {
+        finish({ error });
+      }
+    };
+
+    for (const call of awaitingHostToolCalls.values()) {
+      continueOpts.emit({
+        type: 'tool-call',
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        input: call.input,
+        providerExecuted: false,
+      });
+    }
+
+    return {
+      async submitToolResult(args) {
+        const awaited =
+          state === 'waiting'
+            ? awaitingHostToolCalls.get(args.toolCallId)
+            : undefined;
+        if (awaited == null) {
+          deliverHostToolResult(args);
+          return;
+        }
+        awaitingHostToolCalls.delete(args.toolCallId);
+        injectHostToolResult({
+          toolCallId: args.toolCallId,
+          toolName: awaited.toolName,
+          output: args.output,
+          ...(args.isError !== undefined ? { isError: args.isError } : {}),
+        });
+        if (awaitingHostToolCalls.size > 0) {
+          // Partial settle: the turn stays parked on the remaining calls.
+          // Make the injected outcome durable now — the next continuation may
+          // run in another process and must find it in the journal.
+          await persistSessionFile().catch(() => {});
+          return;
+        }
+        await startContinuationTurn();
+      },
+      async submitToolApproval(args) {
+        deliverHostToolApproval(args);
+      },
+      async submitUserMessage(text) {
+        await piSession?.steer(text);
+      },
+      done,
+    };
+  }
+
   const doStop = async (): Promise<HarnessV1ResumeSessionState> => {
     if (stopped) {
       throw new Error('Pi session has been stopped.');
     }
     stopped = true;
     parkedPiSessions.delete(input.sessionId);
+    deferredContinuation?.reject(new Error('Pi session stopped'));
     settlePendingToolResults('Pi session stopped');
     settlePendingToolApprovals('Pi session stopped');
 
@@ -918,6 +1203,16 @@ export async function createPiSession(
       }
 
       /*
+       * The parked turn was waiting on host input for recorded tool calls and
+       * its live session did not survive to here: hold the rerun until the
+       * host settles those calls, injecting each outcome into the rebuilt
+       * context first.
+       */
+      if (awaitingHostToolCalls.size > 0) {
+        return deferContinueTurnForHostOutcomes(continueOpts);
+      }
+
+      /*
        * Pi runs the model on the host, so there is no live turn in the sandbox
        * to attach to — the previous slice's turn died with its process.
        * Rerun-continue: re-drive the agent from the journal restored on resume.
@@ -950,6 +1245,7 @@ export async function createPiSession(
       if (stopped) return;
       stopped = true;
       parkedPiSessions.delete(input.sessionId);
+      deferredContinuation?.reject(new Error('Pi session stopped'));
       settlePendingToolResults('Pi session stopped');
       settlePendingToolApprovals('Pi session stopped');
       unsubscribe?.();
@@ -963,8 +1259,15 @@ export async function createPiSession(
     doStop,
 
     doDetach: async (): Promise<HarnessV1ResumeSessionState> => {
-      if (activeTurn != null || pendingToolResults.size > 0) {
+      if (
+        activeTurn != null ||
+        pendingToolResults.size > 0 ||
+        awaitingHostToolCalls.size > 0
+      ) {
         parkedPiSessions.set(input.sessionId, sessionImpl);
+        // A deferred continuation still parked on host input hands over to
+        // the next resume; close its stream cleanly.
+        deferredContinuation?.resolve();
         if (sessionFileName) {
           try {
             await persistSessionFile();
@@ -991,10 +1294,14 @@ export async function createPiSession(
         throw new Error('Pi session has been stopped.');
       }
       if (
-        activeTurn != null &&
-        (pendingToolResults.size > 0 || pendingToolApprovals.size > 0)
+        (activeTurn != null &&
+          (pendingToolResults.size > 0 || pendingToolApprovals.size > 0)) ||
+        (activeTurn == null && awaitingHostToolCalls.size > 0)
       ) {
         parkedPiSessions.set(input.sessionId, sessionImpl);
+        // A deferred continuation still parked on host input hands over to
+        // the next resume; close its stream cleanly.
+        deferredContinuation?.resolve();
         if (sessionFileName) {
           try {
             await persistSessionFile();

@@ -2,12 +2,17 @@ import {
   commonTool,
   type HarnessV1,
   type HarnessV1BuiltinTool,
+  type HarnessV1ContinueTurnState,
 } from '@ai-sdk/harness';
 import { tool } from '@ai-sdk/provider-utils';
 import { z } from 'zod/v4';
 import type { PiAuthOptions } from './pi-auth';
 import { piResumeStateSchema } from './pi-resume-state';
-import { createPiSession, type PiThinkingLevel } from './pi-session';
+import {
+  createPiSession,
+  type PiPendingHostToolCall,
+  type PiThinkingLevel,
+} from './pi-session';
 import { VERSION } from './version';
 
 /**
@@ -132,6 +137,9 @@ export function createPi(
       const resumeData = lifecycleState?.data as
         | { sessionFileName?: string }
         | undefined;
+      const pendingHostToolCalls = collectPendingHostToolCalls(
+        startOpts.continueFrom ?? startOpts.resumeFrom?.continueFrom,
+      );
 
       return createPiSession({
         sessionId: startOpts.sessionId,
@@ -152,6 +160,7 @@ export function createPi(
         ...(resumeData?.sessionFileName
           ? { resumeSessionFileName: resumeData.sessionFileName }
           : {}),
+        ...(pendingHostToolCalls.length > 0 ? { pendingHostToolCalls } : {}),
         ...(startOpts.abortSignal
           ? { abortSignal: startOpts.abortSignal }
           : {}),
@@ -159,4 +168,34 @@ export function createPi(
       });
     },
   };
+}
+
+/**
+ * The recorded host tool calls a continuation must settle before the rebuilt
+ * Pi session may re-drive its turn (see `PiPendingHostToolCall`): custom-tool
+ * approvals still undecided, plus host executions still without a result.
+ * Builtin approvals are excluded — they gate Pi-executed tools, so no
+ * host-submitted result exists to wait for.
+ */
+function collectPendingHostToolCalls(
+  continueFrom: HarnessV1ContinueTurnState | undefined,
+): PiPendingHostToolCall[] {
+  if (continueFrom == null) return [];
+  const byToolCallId = new Map<string, PiPendingHostToolCall>();
+  for (const approval of continueFrom.pendingToolApprovals ?? []) {
+    if (approval.kind !== 'custom') continue;
+    byToolCallId.set(approval.toolCallId, {
+      toolCallId: approval.toolCallId,
+      toolName: approval.toolName,
+      input: approval.input,
+    });
+  }
+  for (const pendingResult of continueFrom.pendingToolResults ?? []) {
+    byToolCallId.set(pendingResult.toolCallId, {
+      toolCallId: pendingResult.toolCallId,
+      toolName: pendingResult.toolName,
+      input: pendingResult.input,
+    });
+  }
+  return [...byToolCallId.values()];
 }

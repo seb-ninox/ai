@@ -17,15 +17,20 @@ type FakeAgentsFile = { path: string; content: string };
 type FakeAgentsFilesOverride = (base: { agentsFiles: FakeAgentsFile[] }) => {
   agentsFiles: FakeAgentsFile[];
 };
+type FakeSystemPromptOverride = (
+  base: string | undefined,
+) => string | undefined;
+type FakeResourceLoaderOptions = {
+  agentsFilesOverride?: FakeAgentsFilesOverride;
+  systemPromptOverride?: FakeSystemPromptOverride;
+};
 
 const piMock = vi.hoisted(() => {
   return {
     createAgentSession: vi.fn(),
     customTools: [] as FakePiTool[],
     session: undefined as AgentSession | undefined,
-    resourceLoaderOptions: undefined as
-      | { agentsFilesOverride?: FakeAgentsFilesOverride }
-      | undefined,
+    resourceLoaderOptions: undefined as FakeResourceLoaderOptions | undefined,
   };
 });
 
@@ -33,7 +38,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
   return {
     createAgentSession: piMock.createAgentSession,
     DefaultResourceLoader: class {
-      constructor(options: { agentsFilesOverride?: FakeAgentsFilesOverride }) {
+      constructor(options: FakeResourceLoaderOptions) {
         piMock.resourceLoaderOptions = options;
       }
       async reload() {}
@@ -781,6 +786,47 @@ describe('createPiSession', () => {
 
     it('ignores whitespace-only instructions', async () => {
       expect(await loadAgentsFiles('   \n  ')).toEqual([]);
+    });
+  });
+
+  describe('systemPrompt', () => {
+    async function loadSystemPrompt(
+      systemPrompt: string | undefined,
+      piBase: string | undefined = "You are an expert coding assistant operating inside pi.",
+    ): Promise<string | undefined> {
+      await createPiSession({
+        sessionId: 'session-system-prompt',
+        sandboxSession: createSandboxSession(),
+        sessionWorkDir: '/sandbox/work',
+        skills: [],
+        settings: {},
+        clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+        isResume: false,
+        ...(systemPrompt === undefined ? {} : { systemPrompt }),
+      });
+
+      const override = piMock.resourceLoaderOptions?.systemPromptOverride;
+      return override ? override(piBase) : piBase;
+    }
+
+    it('replaces Pi’s base system prompt', async () => {
+      expect(await loadSystemPrompt('You are the Ninox agent.')).toBe(
+        'You are the Ninox agent.',
+      );
+    });
+
+    it('leaves Pi’s own prompt in place when unset', async () => {
+      expect(await loadSystemPrompt(undefined)).toBe(
+        'You are an expert coding assistant operating inside pi.',
+      );
+    });
+
+    // A blank setting is a configuration mistake, not a request for an empty
+    // system prompt: falling back to Pi's prompt keeps the agent usable.
+    it('ignores a whitespace-only prompt', async () => {
+      expect(await loadSystemPrompt('   \n ')).toBe(
+        'You are an expert coding assistant operating inside pi.',
+      );
     });
   });
 });

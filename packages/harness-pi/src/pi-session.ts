@@ -247,6 +247,11 @@ export interface CreatePiSessionInput {
    * user message. See `PiHarnessSettings.projectInstructions`.
    */
   readonly projectInstructions?: string;
+  /**
+   * Replaces Pi's own base system prompt. See
+   * `PiHarnessSettings.systemPrompt`.
+   */
+  readonly systemPrompt?: string;
 }
 
 interface PendingToolResult {
@@ -464,11 +469,28 @@ export async function createPiSession(
   const projectInstructions = input.projectInstructions?.trim();
   const projectInstructionsPath = path.posix.join(sessionWorkDir, 'AGENTS.md');
 
+  /*
+   * Replace Pi's base system prompt when the host supplies one.
+   *
+   * Pi's default opens with "You are an expert coding assistant operating inside
+   * pi" and carries a block of absolute paths to Pi's own README, docs and
+   * examples. For a harness embedding Pi as an agent runtime that is both a wrong
+   * persona and a standing invitation to read Pi's documentation, and it is paid
+   * for on every turn. Routed through the resource loader — the same seam
+   * `projectInstructions` uses — because that is what `_rebuildSystemPrompt`
+   * reads as `customPrompt`, so the replacement survives every session rebuild
+   * and every resume without touching Pi itself. Context files, the skills
+   * section and the cwd line are still appended by Pi, so a custom prompt loses
+   * neither the agent definition nor skill discovery.
+   */
+  const systemPrompt = input.systemPrompt?.trim();
+
   const resourceLoader = new DefaultResourceLoader({
     cwd: sessionWorkDir,
     agentDir: hostAgentDir,
     settingsManager,
     appendSystemPromptOverride: () => [],
+    ...(systemPrompt ? { systemPromptOverride: () => systemPrompt } : {}),
     extensionFactories: [],
     // Appended last so it outranks any ancestor `AGENTS.md`. A file discovered
     // at the same path is replaced rather than duplicated, keeping one entry

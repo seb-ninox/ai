@@ -60,6 +60,19 @@ export type PiHarnessSettings = {
    * per-turn field.
    */
   readonly projectInstructions?: string;
+  /**
+   * Replaces Pi's base system prompt — the "expert coding assistant operating
+   * inside pi" preamble, its tool list, its guidelines and the paths to Pi's own
+   * documentation — with the host's own. Pi still appends what it derives from
+   * the session: the `<project_context>` block (see `projectInstructions`), the
+   * available-skills section, and the working directory.
+   *
+   * Set this when the harness runs an agent that is not a coding assistant: the
+   * default preamble is both a persona the host did not ask for and a per-turn
+   * cost (~500 tokens, most of it Pi's documentation index). Leave it unset to
+   * keep Pi's own prompt.
+   */
+  readonly systemPrompt?: string;
 };
 
 const PI_BUILTIN_TOOLS = {
@@ -182,6 +195,9 @@ export function createPi(
         ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
         ...(settings.projectInstructions
           ? { projectInstructions: settings.projectInstructions }
+          : {}),
+        ...(settings.systemPrompt
+          ? { systemPrompt: settings.systemPrompt }
           : {}),
       });
     },

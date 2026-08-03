@@ -1238,16 +1238,47 @@ export async function validateToolCall<TOOLS extends ToolSet>(args: {
       : {}),
   };
 
-  const parsed = await parseToolCall<TOOLS>({
-    toolCall,
-    tools,
-    repairToolCall: undefined,
-    refineToolInput: undefined,
-    instructions: undefined,
-    messages: [],
-  });
+  try {
+    const parsed = await parseToolCall<TOOLS>({
+      toolCall,
+      tools,
+      repairToolCall: undefined,
+      refineToolInput: undefined,
+      instructions: undefined,
+      messages: [],
+    });
 
-  return parsed as TextStreamPart<TOOLS>;
+    return parsed as TextStreamPart<TOOLS>;
+  } catch (error) {
+    /*
+     * `parseToolCall` reports an unparseable call in one of two ways depending on the
+     * `ai` version the harness is BUILT AGAINST versus the one it RUNS against: newer
+     * versions return an `invalid: true` part, published `ai@7.x` throws
+     * `AI_InvalidToolInputError`. Only the returning shape is documented above, so a
+     * host running the published package got the throw — out of a transform with no
+     * handler, which errors the consumer stream and fails the whole turn.
+     *
+     * That is the wrong outcome for a recoverable mistake. A model that omits one
+     * required field should be told so and get to try again; instead the turn died and
+     * the user saw a generic "could not be completed". Producing the documented invalid
+     * part here makes both `ai` versions behave the same, and lets the call reach the
+     * tool boundary, whose own schema validation returns the error to the model as a
+     * tool result it can act on.
+     */
+    const raw = await safeParseJSON({ text: event.input });
+    return {
+      type: 'tool-call',
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      input: raw.success ? raw.value : event.input,
+      invalid: true,
+      error,
+      ...(hasTool({ tools, toolName: event.toolName }) ? {} : { dynamic: true }),
+      ...(event.providerExecuted !== undefined
+        ? { providerExecuted: event.providerExecuted }
+        : {}),
+    } as TextStreamPart<TOOLS>;
+  }
 }
 
 /** Best-effort plain text of the turn's prompt, for telemetry input messages. */

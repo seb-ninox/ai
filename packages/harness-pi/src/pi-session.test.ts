@@ -829,6 +829,54 @@ describe('createPiSession', () => {
       );
     });
   });
+
+  /*
+   * Skills are materialized into sandbox HOME on EVERY session build, resumed sessions
+   * included, and hosts depend on that rather than on the sandbox snapshot carrying them:
+   * a snapshot holding every skill file costs tens of kilobytes on every turn's write and
+   * read for bytes that are overwritten on restore anyway, so a host that persists its own
+   * sandbox is right to strip them before storing.
+   *
+   * The failure mode if this regresses is silent — a resumed agent comes back with a
+   * `<available_skills>` section pointing at files that no longer exist, and simply stops
+   * being able to read any of them — so the guarantee is pinned here rather than left to
+   * the reader of an ungated call site.
+   */
+  describe('skills on a resumed session', () => {
+    async function skillWritesFor(isResume: boolean): Promise<string[]> {
+      const sandbox = createSandboxSession({ homeDir: '/home/agent' });
+      await createPiSession({
+        sessionId: `session-skills-${String(isResume)}`,
+        sandboxSession: sandbox,
+        sessionWorkDir: '/sandbox/work',
+        skills: [{ name: 'demo', description: 'Demo skill.', content: 'Body.' }],
+        settings: {},
+        clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+        isResume,
+        ...(isResume ? { resumeSessionFileName: 'session.jsonl' } : {}),
+      });
+
+      const writeTextFile = vi.mocked(
+        (sandbox as unknown as { writeTextFile: (input: unknown) => unknown })
+          .writeTextFile,
+      );
+      return writeTextFile.mock.calls.map(
+        ([input]) => (input as { path: string }).path,
+      );
+    }
+
+    it('materializes skills on a fresh session', async () => {
+      expect(await skillWritesFor(false)).toContain(
+        '/home/agent/.agents/skills/demo/SKILL.md',
+      );
+    });
+
+    it('materializes skills again on a resumed session', async () => {
+      expect(await skillWritesFor(true)).toContain(
+        '/home/agent/.agents/skills/demo/SKILL.md',
+      );
+    });
+  });
 });
 
 function createDeferred<T>() {
@@ -841,14 +889,28 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function createSandboxSession(): HarnessV1NetworkSandboxSession {
+/**
+ * `homeDir` answers the `$HOME` probe `resolveSandboxHomeDir` runs, which is only reached
+ * by a session that materializes skills — every other test here passes no skills and can
+ * leave it unset.
+ */
+function createSandboxSession(
+  options: { readonly homeDir?: string } = {},
+): HarnessV1NetworkSandboxSession {
   const sandbox = {
     defaultWorkingDirectory: '/sandbox',
     destroy: vi.fn(async () => {}),
     getPortUrl: vi.fn(),
     readBinaryFile: vi.fn(async () => undefined),
     restricted: vi.fn(() => sandbox),
-    run: vi.fn(async () => ({ stdout: '', stderr: '', exitCode: 0 })),
+    run: vi.fn(async ({ command }: { command: string }) => ({
+      stdout:
+        options.homeDir !== undefined && command.includes('$HOME')
+          ? options.homeDir
+          : '',
+      stderr: '',
+      exitCode: 0,
+    })),
     stop: vi.fn(async () => {}),
     writeBinaryFile: vi.fn(async () => {}),
     writeTextFile: vi.fn(async () => {}),

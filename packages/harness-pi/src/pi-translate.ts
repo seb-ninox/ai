@@ -136,7 +136,22 @@ function resolveToolName(
   return { wire: common ?? nativeName, native: nativeName };
 }
 
-function finishStep(state: PiTranslatorState): HarnessV1StreamPart[] {
+type PiStepUsage = Extract<
+  HarnessV1StreamPart,
+  { type: 'finish-step' }
+>['usage'];
+
+function emptyStepUsage(): PiStepUsage {
+  return {
+    inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 0, text: 0, reasoning: 0 },
+  };
+}
+
+function finishStep(
+  state: PiTranslatorState,
+  usage: PiStepUsage = emptyStepUsage(),
+): HarnessV1StreamPart[] {
   if (!state.stepOpen || state.pendingStepToolCallIds.size > 0) return [];
   state.stepOpen = false;
   state.pendingStepToolCallIds.clear();
@@ -144,10 +159,7 @@ function finishStep(state: PiTranslatorState): HarnessV1StreamPart[] {
     {
       type: 'finish-step',
       finishReason: { unified: 'stop', raw: 'stop' },
-      usage: {
-        inputTokens: { total: 0, noCache: 0, cacheRead: 0, cacheWrite: 0 },
-        outputTokens: { total: 0, text: 0, reasoning: 0 },
-      },
+      usage,
       harnessMetadata: { pi: { inferredStep: true } },
     },
   ];
@@ -156,10 +168,11 @@ function finishStep(state: PiTranslatorState): HarnessV1StreamPart[] {
 export function finishPiApprovalStep(
   state: PiTranslatorState,
   toolCallId: string,
+  usage: PiStepUsage = emptyStepUsage(),
 ): HarnessV1StreamPart[] {
   state.stepOpen = true;
   state.pendingStepToolCallIds.delete(toolCallId);
-  return finishStep(state);
+  return finishStep(state, usage);
 }
 
 /**

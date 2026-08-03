@@ -261,6 +261,38 @@ interface ActivePiTurn {
   readonly done: Promise<void>;
 }
 
+interface PiTokenSnapshot {
+  readonly input: number;
+  readonly output: number;
+  readonly cacheRead: number;
+  readonly cacheWrite: number;
+}
+
+function tokenSnapshot(session: AgentSession): PiTokenSnapshot {
+  return { ...session.getSessionStats().tokens };
+}
+
+function usageSince(after: PiTokenSnapshot, before: PiTokenSnapshot) {
+  const delta = (current: number, baseline: number) =>
+    Math.max(0, current - baseline);
+  const noCache = delta(after.input, before.input);
+  const cacheRead = delta(after.cacheRead, before.cacheRead);
+  const cacheWrite = delta(after.cacheWrite, before.cacheWrite);
+  return {
+    inputTokens: {
+      total: noCache + cacheRead + cacheWrite,
+      noCache,
+      cacheRead,
+      cacheWrite,
+    },
+    outputTokens: {
+      total: delta(after.output, before.output),
+      text: undefined,
+      reasoning: undefined,
+    },
+  };
+}
+
 /*
  * Pi's message types, derived from the `AgentSession` surface instead of
  * imported: `@earendil-works/pi-agent-core` / `pi-ai` are transitive
@@ -503,6 +535,7 @@ export async function createPiSession(
   let currentEmit: ((part: HarnessV1StreamPart) => void) | undefined;
   let translatorState: PiTranslatorState | undefined;
   let activeTurn: ActivePiTurn | undefined;
+  let turnUsageBaseline: PiTokenSnapshot | undefined;
   /*
    * Compaction parts produced while no turn is active. Pi's `compact()` aborts
    * the current turn before it summarizes, so a manually triggered compaction
@@ -709,19 +742,26 @@ export async function createPiSession(
     ) {
       return { approved: true };
     }
+    if (translatorState) {
+      const session = piSession;
+      const before = turnUsageBaseline;
+      const after = session == null ? undefined : tokenSnapshot(session);
+      for (const part of finishPiApprovalStep(
+        translatorState,
+        args.toolCallId,
+        before === undefined || after === undefined
+          ? undefined
+          : usageSince(after, before),
+      )) {
+        currentEmit?.(part);
+      }
+      if (after !== undefined) turnUsageBaseline = after;
+    }
     currentEmit?.({
       type: 'tool-approval-request',
       approvalId: args.toolCallId,
       toolCallId: args.toolCallId,
     });
-    if (translatorState) {
-      for (const part of finishPiApprovalStep(
-        translatorState,
-        args.toolCallId,
-      )) {
-        currentEmit?.(part);
-      }
-    }
     return new Promise(resolve => {
       pendingToolApprovals.set(args.toolCallId, { resolve });
     });
@@ -811,7 +851,6 @@ export async function createPiSession(
       builtinToolNames: builtinNames,
       nativeToCommon: NATIVE_TO_COMMON,
     });
-
     unsubscribe = piSession.subscribe(rawEvent => {
       if (!translatorState) return;
       const event = parseNativeEvent(rawEvent);
@@ -865,6 +904,7 @@ export async function createPiSession(
       builtinToolNames: [...PI_NATIVE_BUILTIN_NAMES],
       nativeToCommon: NATIVE_TO_COMMON,
     });
+    turnUsageBaseline = tokenSnapshot(piSession!);
 
     turnOpts.emit({ type: 'stream-start' });
 
@@ -917,23 +957,13 @@ export async function createPiSession(
           }
         }
 
-        const stats = session.getSessionStats();
+        const usage = usageSince(
+          tokenSnapshot(session),
+          turnUsageBaseline ?? tokenSnapshot(session),
+        );
         const finishReason = {
           unified: 'stop' as const,
           raw: undefined,
-        };
-        const usage = {
-          inputTokens: {
-            total: stats.tokens.input,
-            noCache: undefined,
-            cacheRead: stats.tokens.cacheRead,
-            cacheWrite: stats.tokens.cacheWrite,
-          },
-          outputTokens: {
-            total: stats.tokens.output,
-            text: undefined,
-            reasoning: undefined,
-          },
         };
         currentEmit?.({
           type: 'finish',

@@ -323,7 +323,12 @@ describe('createPiSession', () => {
         role: 'assistant',
         stopReason: 'toolUse',
         content: [
-          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
+          {
+            type: 'toolCall',
+            id: 'tool-1',
+            name: 'applyChanges',
+            arguments: {},
+          },
         ],
         timestamp: 2,
       },
@@ -409,8 +414,18 @@ describe('createPiSession', () => {
         role: 'assistant',
         stopReason: 'toolUse',
         content: [
-          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
-          { type: 'toolCall', id: 'tool-2', name: 'applyChanges', arguments: {} },
+          {
+            type: 'toolCall',
+            id: 'tool-1',
+            name: 'applyChanges',
+            arguments: {},
+          },
+          {
+            type: 'toolCall',
+            id: 'tool-2',
+            name: 'applyChanges',
+            arguments: {},
+          },
         ],
         timestamp: 1,
       },
@@ -467,7 +482,12 @@ describe('createPiSession', () => {
         role: 'assistant',
         stopReason: 'toolUse',
         content: [
-          { type: 'toolCall', id: 'tool-1', name: 'applyChanges', arguments: {} },
+          {
+            type: 'toolCall',
+            id: 'tool-1',
+            name: 'applyChanges',
+            arguments: {},
+          },
         ],
         timestamp: 1,
       },
@@ -585,6 +605,72 @@ describe('createPiSession', () => {
     expect(textEndIndex).toBeGreaterThan(-1);
     expect(finishStepIndex).toBeGreaterThan(textEndIndex);
     expect(finishIndex).toBeGreaterThan(finishStepIndex);
+  });
+
+  it('reports per-turn token deltas instead of cumulative session totals', async () => {
+    const tokens = { input: 100, output: 40, cacheRead: 20, cacheWrite: 10 };
+    const prompt = vi.fn(async () => {
+      if (prompt.mock.calls.length === 1) {
+        Object.assign(tokens, {
+          input: 130,
+          output: 65,
+          cacheRead: 28,
+          cacheWrite: 14,
+        });
+      } else {
+        Object.assign(tokens, {
+          input: 139,
+          output: 72,
+          cacheRead: 31,
+          cacheWrite: 16,
+        });
+      }
+    });
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({ tokens: { ...tokens } }),
+      prompt,
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-usage-deltas',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const firstEmit = vi.fn();
+    const first = await session.doPromptTurn({
+      prompt: 'first',
+      tools: [],
+      emit: firstEmit,
+    });
+    await first.done;
+    const secondEmit = vi.fn();
+    const second = await session.doPromptTurn({
+      prompt: 'second',
+      tools: [],
+      emit: secondEmit,
+    });
+    await second.done;
+
+    const finishUsage = (emit: ReturnType<typeof vi.fn>) =>
+      emit.mock.calls.map(call => call[0]).find(part => part.type === 'finish')
+        .totalUsage;
+    expect(finishUsage(firstEmit)).toMatchObject({
+      inputTokens: { total: 42, noCache: 30, cacheRead: 8, cacheWrite: 4 },
+      outputTokens: { total: 25 },
+    });
+    expect(finishUsage(secondEmit)).toMatchObject({
+      inputTokens: { total: 14, noCache: 9, cacheRead: 3, cacheWrite: 2 },
+      outputTokens: { total: 7 },
+    });
   });
 
   it('uses agentDir for auth, models, and settings when provided', async () => {

@@ -197,9 +197,13 @@ describe('translatePiEvent', () => {
       state,
     );
 
-    expect(finishPiApprovalStep(state, 'approval-1').map(p => p.type)).toEqual([
-      'finish-step',
-    ]);
+    const usage = {
+      inputTokens: { total: 11, noCache: 2, cacheRead: 6, cacheWrite: 3 },
+      outputTokens: { total: 7, text: undefined, reasoning: undefined },
+    };
+    const parts = finishPiApprovalStep(state, 'approval-1', usage);
+    expect(parts.map(p => p.type)).toEqual(['finish-step']);
+    expect(parts[0]).toMatchObject({ type: 'finish-step', usage });
   });
 
   it('emits reasoning-start lazily on first thinking_delta', () => {

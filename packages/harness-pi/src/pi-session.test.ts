@@ -13,11 +13,19 @@ import { createPiSession } from './pi-session';
 
 type FakePiTool = Pick<ToolDefinition, 'name' | 'execute'>;
 
+type FakeAgentsFile = { path: string; content: string };
+type FakeAgentsFilesOverride = (base: { agentsFiles: FakeAgentsFile[] }) => {
+  agentsFiles: FakeAgentsFile[];
+};
+
 const piMock = vi.hoisted(() => {
   return {
     createAgentSession: vi.fn(),
     customTools: [] as FakePiTool[],
     session: undefined as AgentSession | undefined,
+    resourceLoaderOptions: undefined as
+      | { agentsFilesOverride?: FakeAgentsFilesOverride }
+      | undefined,
   };
 });
 
@@ -25,6 +33,9 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
   return {
     createAgentSession: piMock.createAgentSession,
     DefaultResourceLoader: class {
+      constructor(options: { agentsFilesOverride?: FakeAgentsFilesOverride }) {
+        piMock.resourceLoaderOptions = options;
+      }
       async reload() {}
     },
     defineTool: vi.fn(tool => tool),
@@ -56,6 +67,7 @@ describe('createPiSession', () => {
   beforeEach(() => {
     piMock.customTools = [];
     piMock.session = undefined;
+    piMock.resourceLoaderOptions = undefined;
     piMock.createAgentSession.mockReset();
     piMock.createAgentSession.mockImplementation(async options => {
       piMock.customTools = options.customTools;
@@ -717,6 +729,59 @@ describe('createPiSession', () => {
 
     expect(SettingsManager.inMemory).toHaveBeenCalledTimes(1);
     expect(SettingsManager.create).not.toHaveBeenCalled();
+  });
+
+  describe('projectInstructions', () => {
+    async function loadAgentsFiles(
+      projectInstructions: string | undefined,
+      discovered: FakeAgentsFile[] = [],
+    ): Promise<FakeAgentsFile[]> {
+      await createPiSession({
+        sessionId: 'session-project-instructions',
+        sandboxSession: createSandboxSession(),
+        sessionWorkDir: '/sandbox/work',
+        skills: [],
+        settings: {},
+        clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+        isResume: false,
+        ...(projectInstructions === undefined ? {} : { projectInstructions }),
+      });
+
+      const override = piMock.resourceLoaderOptions?.agentsFilesOverride;
+      if (!override) throw new Error('Expected an agentsFiles override.');
+      return override({ agentsFiles: discovered }).agentsFiles;
+    }
+
+    it('surfaces instructions as a workspace-root AGENTS.md context file', async () => {
+      expect(await loadAgentsFiles('Be concise.')).toEqual([
+        { path: '/sandbox/work/AGENTS.md', content: 'Be concise.' },
+      ]);
+    });
+
+    it('leaves discovered context files untouched when unset', async () => {
+      const discovered = [{ path: '/sandbox/AGENTS.md', content: 'ancestor' }];
+      expect(await loadAgentsFiles(undefined, discovered)).toEqual(discovered);
+    });
+
+    it('ranks after ancestor context files', async () => {
+      const discovered = [{ path: '/sandbox/AGENTS.md', content: 'ancestor' }];
+      expect(await loadAgentsFiles('Be concise.', discovered)).toEqual([
+        ...discovered,
+        { path: '/sandbox/work/AGENTS.md', content: 'Be concise.' },
+      ]);
+    });
+
+    it('replaces rather than duplicates a workspace AGENTS.md', async () => {
+      expect(
+        await loadAgentsFiles('Be concise.', [
+          { path: '/sandbox/work/AGENTS.md', content: 'from the workspace' },
+        ]),
+      ).toEqual([{ path: '/sandbox/work/AGENTS.md', content: 'Be concise.' }]);
+    });
+
+    it('ignores whitespace-only instructions', async () => {
+      expect(await loadAgentsFiles('   \n  ')).toEqual([]);
+    });
   });
 });
 

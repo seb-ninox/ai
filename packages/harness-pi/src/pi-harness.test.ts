@@ -1,5 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  HarnessV1NetworkSandboxSession,
+  HarnessV1Session,
+} from '@ai-sdk/harness';
 import { createPi } from './pi-harness';
+import { createPiSession } from './pi-session';
+
+vi.mock('./pi-session', () => ({
+  createPiSession: vi.fn(async () => ({}) as HarnessV1Session),
+}));
+
+function startOptions() {
+  return {
+    sessionId: 'session-1',
+    sandboxSession: {} as HarnessV1NetworkSandboxSession,
+    sessionWorkDir: '/sandbox/work',
+  };
+}
 
 describe('createPi adapter', () => {
   it('declares the harness id and builtin tools', () => {
@@ -38,5 +55,25 @@ describe('createPi adapter', () => {
   it('omits getBootstrap (no in-sandbox install needed)', () => {
     const harness = createPi();
     expect(harness.getBootstrap).toBeUndefined();
+  });
+
+  it('forwards projectInstructions to the session', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({ projectInstructions: 'Be concise.' }).doStart(
+      startOptions(),
+    );
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).toMatchObject({
+      projectInstructions: 'Be concise.',
+    });
+  });
+
+  it('omits projectInstructions when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi().doStart(startOptions());
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).not.toHaveProperty(
+      'projectInstructions',
+    );
   });
 });

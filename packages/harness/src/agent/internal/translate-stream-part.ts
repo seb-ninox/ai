@@ -101,6 +101,20 @@ export function translateStreamPart<TOOLS extends ToolSet>(
       return [];
 
     case 'tool-result':
+      if (event.isError) {
+        return [
+          {
+            type: 'tool-error',
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            input: undefined,
+            error: event.result,
+            ...(event.providerMetadata !== undefined
+              ? { providerMetadata: event.providerMetadata }
+              : {}),
+          } as TextStreamPart<TOOLS>,
+        ];
+      }
       return [
         {
           type: 'tool-result',

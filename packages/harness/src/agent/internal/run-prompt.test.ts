@@ -20,6 +20,7 @@ import type {
   HarnessV1StreamPart,
 } from '../../v1';
 import { runPrompt } from './run-prompt';
+import { HarnessToolError } from '../harness-tool-error';
 
 const WORK_DIR = '/vercel/sandbox/claude-code-abc123';
 const sandboxSession = {} as Experimental_SandboxSession;
@@ -789,6 +790,15 @@ describe('runPrompt host tool generator results', () => {
             toolCallId: 'c1',
             toolName: 'weather',
             input: JSON.stringify({ city: 'SF' }),
+            usage: {
+              inputTokens: {
+                total: 15,
+                noCache: 4,
+                cacheRead: 8,
+                cacheWrite: 3,
+              },
+              outputTokens: { total: 6, text: 6, reasoning: 0 },
+            },
           },
         ],
         input => submitted.push(input),
@@ -839,6 +849,15 @@ describe('runPrompt host tool generator results', () => {
     const steps = await result.steps;
     expect(steps).toHaveLength(1);
     expect(steps[0]!.finishReason).toBe('tool-calls');
+    await expect(result.usage).resolves.toMatchObject({
+      inputTokens: 15,
+      outputTokens: 6,
+      inputTokenDetails: {
+        noCacheTokens: 4,
+        cacheReadTokens: 8,
+        cacheWriteTokens: 3,
+      },
+    });
     expect(steps[0]!.content.map(part => part.type)).toEqual([
       'tool-call',
       'tool-approval-request',
@@ -1034,7 +1053,10 @@ describe('runPrompt host tool generator results', () => {
       description: 'Get weather',
       inputSchema: z.object({ city: z.string() }),
       execute: async (): Promise<{ temperature: number }> => {
-        throw new Error('weather unavailable');
+        throw new HarnessToolError({
+          modelMessage: 'Internal weather schema rejected station_id',
+          publicMessage: 'Weather could not be loaded.',
+        });
       },
     });
 
@@ -1084,7 +1106,9 @@ describe('runPrompt host tool generator results', () => {
     expect(submitted).toEqual([
       {
         toolCallId: 'c1',
-        output: { error: 'Error: weather unavailable' },
+        output: {
+          error: 'Internal weather schema rejected station_id',
+        },
         isError: true,
       },
     ]);
@@ -1093,9 +1117,71 @@ describe('runPrompt host tool generator results', () => {
         type: 'tool-error',
         toolCallId: 'c1',
         toolName: 'weather',
-        error: expect.objectContaining({ message: 'weather unavailable' }),
+        error: 'Weather could not be loaded.',
       }),
     );
+    expect(JSON.stringify(parts)).not.toContain('station_id');
+  });
+
+  test('uses a generic public message for an ordinary host tool error', async () => {
+    const weather = tool({
+      description: 'Get weather',
+      inputSchema: z.object({ city: z.string() }),
+      execute: async (): Promise<{ temperature: number }> => {
+        throw new Error('database password was rejected');
+      },
+    });
+
+    const { result, done } = runPrompt({
+      harness,
+      session: fakeSession([]),
+      mode: 'continue',
+      instructions: undefined,
+      tools: { weather } as ToolSet,
+      toolSpecs: [],
+      sandboxSession,
+      sessionWorkDir: WORK_DIR,
+      runtimeContext: {} as never,
+      abortSignal: undefined,
+      pendingToolApprovals: [
+        {
+          approvalId: 'approval-1',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+          kind: 'custom',
+          providerExecuted: false,
+        },
+      ],
+      toolApprovalContinuations: [
+        {
+          approvalResponse: {
+            type: 'tool-approval-response',
+            approvalId: 'approval-1',
+            approved: true,
+          },
+          toolCall: {
+            type: 'tool-call',
+            toolCallId: 'c1',
+            toolName: 'weather',
+            input: { city: 'SF' },
+            providerExecuted: false,
+          },
+        },
+      ],
+    });
+
+    const parts: TextStreamPart<ToolSet>[] = [];
+    for await (const part of result.fullStream) parts.push(part);
+    await done;
+
+    expect(parts).toContainEqual(
+      expect.objectContaining({
+        type: 'tool-error',
+        error: 'The tool could not complete this action.',
+      }),
+    );
+    expect(JSON.stringify(parts)).not.toContain('database password');
   });
 
   test('does not reuse a consumed approval for replayed custom tool calls', async () => {

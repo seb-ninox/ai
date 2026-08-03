@@ -31,6 +31,8 @@ export interface PiTranslatorState {
   pendingStepToolCallIds: Set<string>;
   /** Whether the current assistant message has opened a visible step. */
   stepOpen: boolean;
+  /** Exact provider usage from the assistant message that opened the step. */
+  pendingStepUsage: PiStepUsage | undefined;
   /**
    * Tool-call id → the exact output value the host submitted for a
    * user-registered (host-executed) tool. Pi only echoes the tool result back
@@ -81,6 +83,7 @@ export function createPiTranslatorState(
     observedToolNames: new Map(),
     pendingStepToolCallIds: new Set(),
     stepOpen: false,
+    pendingStepUsage: undefined,
     hostToolResults: new Map(),
     builtinToolNames: new Set(options.builtinToolNames ?? []),
     nativeToCommonNameMap: map,
@@ -150,16 +153,18 @@ function emptyStepUsage(): PiStepUsage {
 
 function finishStep(
   state: PiTranslatorState,
-  usage: PiStepUsage = emptyStepUsage(),
+  usage?: PiStepUsage,
 ): HarnessV1StreamPart[] {
   if (!state.stepOpen || state.pendingStepToolCallIds.size > 0) return [];
   state.stepOpen = false;
   state.pendingStepToolCallIds.clear();
+  const resolvedUsage = state.pendingStepUsage ?? usage ?? emptyStepUsage();
+  state.pendingStepUsage = undefined;
   return [
     {
       type: 'finish-step',
       finishReason: { unified: 'stop', raw: 'stop' },
-      usage,
+      usage: resolvedUsage,
       harnessMetadata: { pi: { inferredStep: true } },
     },
   ];
@@ -173,6 +178,37 @@ export function finishPiApprovalStep(
   state.stepOpen = true;
   state.pendingStepToolCallIds.delete(toolCallId);
   return finishStep(state, usage);
+}
+
+export function consumePendingPiStepUsage(
+  state: PiTranslatorState,
+): PiStepUsage | undefined {
+  const usage = state.pendingStepUsage;
+  state.pendingStepUsage = undefined;
+  return usage;
+}
+
+function extractPiStepUsage(
+  message: PiSessionEvent['message'],
+): PiStepUsage | undefined {
+  const usage = message?.usage;
+  if (!usage) return undefined;
+  return {
+    inputTokens: {
+      total: usage.input + usage.cacheRead + usage.cacheWrite,
+      noCache: usage.input,
+      cacheRead: usage.cacheRead,
+      cacheWrite: usage.cacheWrite,
+    },
+    outputTokens: {
+      total: usage.output,
+      text:
+        usage.reasoning === undefined
+          ? undefined
+          : Math.max(0, usage.output - usage.reasoning),
+      reasoning: usage.reasoning,
+    },
+  };
 }
 
 /**
@@ -316,6 +352,8 @@ export function translatePiEvent(
     case 'turn_end': {
       if (!state.promptStarted) return [];
       const parts: HarnessV1StreamPart[] = [];
+      state.pendingStepUsage =
+        extractPiStepUsage(event.message) ?? state.pendingStepUsage;
       const fullText = extractAssistantText(event.message);
       if (
         state.currentTextId &&
@@ -364,6 +402,9 @@ export function translatePiEvent(
           input,
           ...(wire !== native ? { nativeName: native } : {}),
           ...(providerExecuted ? { providerExecuted: true } : {}),
+          ...(!providerExecuted && state.pendingStepUsage
+            ? { usage: state.pendingStepUsage }
+            : {}),
         } as HarnessV1StreamPart,
       ];
     }

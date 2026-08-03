@@ -46,6 +46,7 @@ import {
   safePiSessionFileName,
 } from './pi-resume-state';
 import {
+  consumePendingPiStepUsage,
   createPiTranslatorState,
   finishPiApprovalStep,
   flushOpenStep,
@@ -240,6 +241,12 @@ export interface CreatePiSessionInput {
    * (e.g. `~/.pi/agent/`) to reuse their CLI auth and model settings.
    */
   readonly agentDir?: string;
+  /**
+   * Operating guidance surfaced as a synthetic workspace-root `AGENTS.md`
+   * context file, so it lands in the system prompt rather than in the first
+   * user message. See `PiHarnessSettings.projectInstructions`.
+   */
+  readonly projectInstructions?: string;
 }
 
 interface PendingToolResult {
@@ -441,12 +448,42 @@ export async function createPiSession(
   // `Model` object handed to `createAgentSession`.
   const resolvedModel = resolveModel(input.settings.model);
 
+  /*
+   * Surface the configured agent definition the way Pi surfaces project
+   * guidance: as an `AGENTS.md` context file, which `buildSystemPrompt` renders
+   * into the system prompt's `<project_context>` block. Nothing is written to
+   * the workspace — Pi reads context files through the resource loader, so a
+   * synthetic entry is indistinguishable from a discovered one, and the
+   * workspace mirror stays a faithful view of the sandbox.
+   *
+   * Sourced from session settings rather than the per-turn `instructions`
+   * field so it is known before the loader's first `reload()`, and so it also
+   * covers resumed sessions and `doContinueTurn` (which carries no
+   * instructions at all).
+   */
+  const projectInstructions = input.projectInstructions?.trim();
+  const projectInstructionsPath = path.posix.join(sessionWorkDir, 'AGENTS.md');
+
   const resourceLoader = new DefaultResourceLoader({
     cwd: sessionWorkDir,
     agentDir: hostAgentDir,
     settingsManager,
     appendSystemPromptOverride: () => [],
     extensionFactories: [],
+    // Appended last so it outranks any ancestor `AGENTS.md`. A file discovered
+    // at the same path is replaced rather than duplicated, keeping one entry
+    // per path in the rendered prompt.
+    agentsFilesOverride: base =>
+      projectInstructions
+        ? {
+            agentsFiles: [
+              ...base.agentsFiles.filter(
+                file => file.path !== projectInstructionsPath,
+              ),
+              { path: projectInstructionsPath, content: projectInstructions },
+            ],
+          }
+        : base,
     // Pi runs in the host process, so its default resource discovery reaches
     // the host developer's personal config (`~/.pi/agent/*`, `~/.agents/*`).
     // The harness does not expose extensions, themes, or prompt templates, so
@@ -536,6 +573,31 @@ export async function createPiSession(
   let translatorState: PiTranslatorState | undefined;
   let activeTurn: ActivePiTurn | undefined;
   let turnUsageBaseline: PiTokenSnapshot | undefined;
+
+  function accountForPendingHostStepUsage(): void {
+    if (!translatorState || !turnUsageBaseline) return;
+    const usage = consumePendingPiStepUsage(translatorState);
+    if (!usage) return;
+    const after = piSession ? tokenSnapshot(piSession) : turnUsageBaseline;
+    turnUsageBaseline = {
+      input: Math.max(
+        after.input,
+        turnUsageBaseline.input + (usage.inputTokens.noCache ?? 0),
+      ),
+      output: Math.max(
+        after.output,
+        turnUsageBaseline.output + (usage.outputTokens.total ?? 0),
+      ),
+      cacheRead: Math.max(
+        after.cacheRead,
+        turnUsageBaseline.cacheRead + (usage.inputTokens.cacheRead ?? 0),
+      ),
+      cacheWrite: Math.max(
+        after.cacheWrite,
+        turnUsageBaseline.cacheWrite + (usage.inputTokens.cacheWrite ?? 0),
+      ),
+    };
+  }
   /*
    * Compaction parts produced while no turn is active. Pi's `compact()` aborts
    * the current turn before it summarizes, so a manually triggered compaction
@@ -1294,6 +1356,7 @@ export async function createPiSession(
         pendingToolResults.size > 0 ||
         awaitingHostToolCalls.size > 0
       ) {
+        accountForPendingHostStepUsage();
         parkedPiSessions.set(input.sessionId, sessionImpl);
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.
@@ -1328,6 +1391,7 @@ export async function createPiSession(
           (pendingToolResults.size > 0 || pendingToolApprovals.size > 0)) ||
         (activeTurn == null && awaitingHostToolCalls.size > 0)
       ) {
+        accountForPendingHostStepUsage();
         parkedPiSessions.set(input.sessionId, sessionImpl);
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.

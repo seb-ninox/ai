@@ -21,6 +21,39 @@ describe('parseNativeEvent', () => {
     expect(parseNativeEvent({})).toBeUndefined();
     expect(parseNativeEvent({ type: 42 })).toBeUndefined();
   });
+
+  it('preserves assistant message token usage', () => {
+    const event = parseNativeEvent({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        usage: {
+          input: 4,
+          output: 6,
+          cacheRead: 8,
+          cacheWrite: 3,
+          reasoning: 2,
+          totalTokens: 21,
+          cost: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            total: 0,
+          },
+        },
+      },
+    });
+
+    expect(event?.message?.usage).toMatchObject({
+      input: 4,
+      output: 6,
+      cacheRead: 8,
+      cacheWrite: 3,
+      reasoning: 2,
+    });
+  });
 });
 
 describe('getPiTerminalError', () => {

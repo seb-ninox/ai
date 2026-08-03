@@ -29,6 +29,10 @@ export type {
 } from '../src/agent/harness-agent-types';
 export { HarnessAgentSession } from '../src/agent/harness-agent-session';
 export {
+  DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE,
+  HarnessToolError,
+} from '../src/agent/harness-tool-error';
+export {
   collectHarnessAgentToolApprovalContinuations,
   type HarnessAgentToolApprovalContinuation,
 } from '../src/agent/harness-agent-tool-approval-continuation';

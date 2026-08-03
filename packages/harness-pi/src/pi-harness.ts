@@ -45,6 +45,21 @@ export type PiHarnessSettings = {
    * model settings.
    */
   readonly agentDir?: string;
+  /**
+   * Operating guidance for the agent, surfaced to Pi the way a project's own
+   * `AGENTS.md` is: as a context file rendered into the system prompt's
+   * `<project_context>` block. Nothing is written to disk.
+   *
+   * This is the system-prompt counterpart of the per-turn
+   * `HarnessV1PromptTurnOptions.instructions`, which the contract requires the
+   * adapter to prepend to the first user message instead. Prefer this setting
+   * for guidance that must survive compaction and resumption: the system
+   * prompt is rebuilt from scratch on every session build, whereas a first
+   * user message can be summarized away and is only reapplied on fresh
+   * sessions. The two are independent — setting this does not suppress the
+   * per-turn field.
+   */
+  readonly projectInstructions?: string;
 };
 
 const PI_BUILTIN_TOOLS = {
@@ -165,6 +180,9 @@ export function createPi(
           ? { abortSignal: startOpts.abortSignal }
           : {}),
         ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
+        ...(settings.projectInstructions
+          ? { projectInstructions: settings.projectInstructions }
+          : {}),
       });
     },
   };

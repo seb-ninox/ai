@@ -191,6 +191,21 @@ describe('translatePiEvent', () => {
           message: {
             role: 'assistant',
             content: [{ type: 'toolCall', id: 'approval-1', name: 'write' }],
+            usage: {
+              input: 2,
+              output: 7,
+              cacheRead: 6,
+              cacheWrite: 3,
+              reasoning: 1,
+              totalTokens: 18,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
           },
         } as PiSessionEvent,
       ],
@@ -199,11 +214,69 @@ describe('translatePiEvent', () => {
 
     const usage = {
       inputTokens: { total: 11, noCache: 2, cacheRead: 6, cacheWrite: 3 },
-      outputTokens: { total: 7, text: undefined, reasoning: undefined },
+      outputTokens: { total: 7, text: 6, reasoning: 1 },
     };
-    const parts = finishPiApprovalStep(state, 'approval-1', usage);
+    const parts = finishPiApprovalStep(state, 'approval-1');
     expect(parts.map(p => p.type)).toEqual(['finish-step']);
     expect(parts[0]).toMatchObject({ type: 'finish-step', usage });
+  });
+
+  it('attaches message usage to a host tool call for an approval pause', () => {
+    const state = createPiTranslatorState();
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'host-1', name: 'weather' }],
+            usage: {
+              input: 4,
+              output: 6,
+              cacheRead: 8,
+              cacheWrite: 3,
+              totalTokens: 21,
+              cost: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                total: 0,
+              },
+            },
+          },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+
+    const parts = translatePiEvent(
+      {
+        type: 'tool_execution_start',
+        toolCallId: 'host-1',
+        toolName: 'weather',
+        args: { city: 'Berlin' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(parts[0]).toMatchObject({
+      type: 'tool-call',
+      usage: {
+        inputTokens: {
+          total: 15,
+          noCache: 4,
+          cacheRead: 8,
+          cacheWrite: 3,
+        },
+        outputTokens: { total: 6 },
+      },
+    });
   });
 
   it('emits reasoning-start lazily on first thinking_delta', () => {

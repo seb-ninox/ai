@@ -70,6 +70,13 @@ export type HarnessV1StreamPart =
   // `true` for runtime-executed builtins, false/undefined for host tools.
   | (LanguageModelV4ToolCall & {
       nativeName?: string;
+      /**
+       * Usage for the assistant step that produced this host tool call.
+       * Adapters may attach it when the runtime pauses before it can emit a
+       * normal finish-step, allowing the harness to close the approval slice
+       * without inventing zero usage.
+       */
+      usage?: LanguageModelV4Usage;
     })
   | LanguageModelV4ToolApprovalRequest
   | LanguageModelV4ToolResult
@@ -267,6 +274,7 @@ export const harnessV1ToolCallPartSchema = z.object({
   dynamic: z.boolean().optional(),
   providerMetadata: harnessV1ProviderMetadataSchema.optional(),
   nativeName: z.string().optional(),
+  usage: harnessV1UsageSchema.optional(),
 });
 
 export const harnessV1ToolApprovalRequestPartSchema = z.object({

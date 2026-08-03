@@ -15,6 +15,25 @@ describe('translateStreamPart', () => {
     expect(out).toHaveLength(0);
   });
 
+  it('translates failed tool results as tool-error parts', () => {
+    const out = translateStreamPart<ToolSet>({
+      type: 'tool-result',
+      toolCallId: 'c1',
+      toolName: 'modify_layout',
+      result: 'Could not update the layout.',
+      isError: true,
+    });
+
+    expect(out).toEqual([
+      expect.objectContaining({
+        type: 'tool-error',
+        toolCallId: 'c1',
+        toolName: 'modify_layout',
+        error: 'Could not update the layout.',
+      }),
+    ]);
+  });
+
   it('fans file-change out into a dynamic provider-executed tool-call + tool-result pair', () => {
     const out = translateStreamPart<ToolSet>({
       type: 'file-change',

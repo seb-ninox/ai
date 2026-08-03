@@ -53,6 +53,11 @@ import {
 import { resolveCustomToolApproval } from './permission-mode';
 import { logBridgeError } from '../../utils/bridge-diagnostics';
 import { pinSandboxChannelEventCheckpoint } from '../../utils/sandbox-channel';
+import {
+  DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE,
+  getHarnessToolModelMessage,
+  getHarnessToolPublicMessage,
+} from '../harness-tool-error';
 
 /**
  * Drive one prompt turn end-to-end:
@@ -136,6 +141,7 @@ export function runPrompt<
   const onPendingToolResult = input.onPendingToolResult ?? (() => {});
   const onToolResultSettled = input.onToolResultSettled ?? (() => {});
   const activeTools = input.activeTools ?? input.tools;
+  const publicToolErrorsByToolCallId = new Map<string, string>();
 
   const telemetry = createTurnTelemetry({
     telemetry: input.telemetry,
@@ -336,6 +342,7 @@ export function runPrompt<
     };
     const finishForHostInputPause = async (options: {
       completeCurrentStep: boolean;
+      usage?: LanguageModelV4Usage;
     }): Promise<void> => {
       // The runtime may keep a text/reasoning block open across the pause and
       // resume it on the continuation stream. Close it here so this result is
@@ -344,13 +351,13 @@ export function runPrompt<
       if (options.completeCurrentStep) {
         await completeStep({
           finishReason: toolCallsFinishReason,
-          usage: zeroUsage,
+          usage: options.usage ?? zeroUsage,
           providerMetadata: undefined,
         });
       }
       await telemetry.end({
         finishReason: toolCallsFinishReason,
-        usage: zeroUsage,
+        usage: options.usage ?? zeroUsage,
       });
       await result.finish();
     };
@@ -462,7 +469,7 @@ export function runPrompt<
         toolCallId: options.toolCall.toolCallId,
         toolName: options.toolCall.toolName,
         input: options.toolCall.input,
-        error: options.outcome.error,
+        error: getHarnessToolPublicMessage(options.outcome.error),
       } as TextStreamPart<TOOLS>);
     };
     const processPendingApprovalContinuation = async (
@@ -523,6 +530,9 @@ export function runPrompt<
         sandboxSession: input.sandboxSession,
         abortSignal: input.abortSignal,
         control,
+        onToolError: ({ toolCallId, publicMessage }) => {
+          publicToolErrorsByToolCallId.set(toolCallId, publicMessage);
+        },
         onPreliminaryResult: preliminaryOutput => {
           const stripped = stripWorkDir(
             {
@@ -548,7 +558,10 @@ export function runPrompt<
       });
       if (!execution.executed) {
         recordPendingToolResult({ toolCall: rawToolCall });
-        await finishForHostInputPause({ completeCurrentStep: false });
+        await finishForHostInputPause({
+          completeCurrentStep: false,
+          usage: rawToolCall.usage,
+        });
         return 'awaiting-tool-result';
       }
       enqueueHostToolOutcome({
@@ -638,7 +651,16 @@ export function runPrompt<
          * execution below — the tools need the absolute path to resolve
          * against the sandbox root, so the strip is display-only.
          */
-        const displayValue = stripWorkDir(value, input.sessionWorkDir);
+        let displayValue = stripWorkDir(value, input.sessionWorkDir);
+        if (displayValue.type === 'tool-result' && displayValue.isError) {
+          displayValue = {
+            ...displayValue,
+            result:
+              publicToolErrorsByToolCallId.get(displayValue.toolCallId) ??
+              DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE,
+          };
+          publicToolErrorsByToolCallId.delete(displayValue.toolCallId);
+        }
         const settledHostInputReplay =
           (displayValue.type === 'tool-call' ||
             displayValue.type === 'tool-result' ||
@@ -810,7 +832,10 @@ export function runPrompt<
             approvalId: pendingApproval.approvalId,
             toolCall,
           });
-          await finishForHostInputPause({ completeCurrentStep: true });
+          await finishForHostInputPause({
+            completeCurrentStep: true,
+            usage: rawToolCall?.usage,
+          });
           return;
         }
 
@@ -939,7 +964,10 @@ export function runPrompt<
               approvalId: pendingApproval.approvalId,
               toolCall: pendingParsedToolCall,
             });
-            await finishForHostInputPause({ completeCurrentStep: true });
+            await finishForHostInputPause({
+              completeCurrentStep: true,
+              usage: toolCall.usage,
+            });
             return;
           }
           const execution = await maybeExecuteHostTool({
@@ -950,6 +978,9 @@ export function runPrompt<
             sandboxSession: input.sandboxSession,
             abortSignal: input.abortSignal,
             control,
+            onToolError: ({ toolCallId, publicMessage }) => {
+              publicToolErrorsByToolCallId.set(toolCallId, publicMessage);
+            },
             onPreliminaryResult: preliminaryOutput => {
               /*
                * Project a `yield`ed value as a preliminary AI SDK
@@ -983,7 +1014,10 @@ export function runPrompt<
           });
           if (!execution.executed) {
             recordPendingToolResult({ toolCall });
-            await finishForHostInputPause({ completeCurrentStep: true });
+            await finishForHostInputPause({
+              completeCurrentStep: true,
+              usage: toolCall.usage,
+            });
             return;
           }
           await telemetry.toolEnd(toolCall.toolCallId, execution.outcome);
@@ -1084,6 +1118,10 @@ async function maybeExecuteHostTool<TOOLS extends ToolSet>(input: {
   sandboxSession: SandboxSession;
   abortSignal: AbortSignal | undefined;
   control: HarnessV1PromptControl;
+  onToolError: (input: {
+    toolCallId: string;
+    publicMessage: string;
+  }) => void;
   /**
    * Called for each value a generator `execute` `yield`s before its last. The
    * caller surfaces these as preliminary `tool-result` parts on the consumer
@@ -1155,9 +1193,14 @@ async function maybeExecuteHostTool<TOOLS extends ToolSet>(input: {
     });
     return { executed: true, outcome: { ok: true, output } };
   } catch (err) {
+    const modelMessage = getHarnessToolModelMessage(err);
+    input.onToolError({
+      toolCallId: input.event.toolCallId,
+      publicMessage: getHarnessToolPublicMessage(err),
+    });
     await input.control.submitToolResult({
       toolCallId: input.event.toolCallId,
-      output: { error: String(err) },
+      output: { error: modelMessage },
       isError: true,
     });
     return { executed: true, outcome: { ok: false, error: err } };

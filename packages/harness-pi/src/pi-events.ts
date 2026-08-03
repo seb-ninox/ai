@@ -1,5 +1,14 @@
 import { z } from 'zod/v4';
 
+const piUsageSchema = z.looseObject({
+  input: z.number(),
+  output: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  reasoning: z.number().optional(),
+  totalTokens: z.number(),
+});
+
 /**
  * Pi `session.subscribe` emits a discriminated union of events. The exact
  * shape evolves with Pi versions; we accept loose objects and extract only
@@ -41,6 +50,7 @@ export const piSessionEventSchema = z.looseObject({
       content: z.unknown().optional(),
       stopReason: z.string().optional(),
       errorMessage: z.string().optional(),
+      usage: piUsageSchema.optional(),
     })
     .optional(),
 });

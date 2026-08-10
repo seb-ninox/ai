@@ -72,7 +72,31 @@ const HARNESS_ID = 'pi';
  * same-process resume instead of stopping it and resolving the promise as an
  * error. Cross-process resume still falls back to the persisted session file.
  */
-const parkedPiSessions = new Map<string, HarnessV1Session>();
+const parkedPiSessions = new Map<string, ParkedPiSession>();
+
+/**
+ * A parked session together with the rebind the NEXT slice must perform before
+ * using it.
+ *
+ * Parking outlives the sandbox it was created with: the host stops the harness
+ * session at the pause, which stops that sandbox, and the resume builds a new
+ * one from the persisted snapshot. A reattach that kept the original sandbox
+ * handle therefore kept writing into a stopped sandbox — most damagingly in
+ * `persistSessionFile`, so the journal the next cold resume reads never
+ * advanced past the last slice that went through the rebuild path. The live
+ * conversation looked healthy (Pi's context is in memory) right up to the first
+ * event that dropped the parked session, at which point the model resumed from
+ * a journal missing every turn since, and redid work it had already done.
+ */
+interface ParkedPiSession {
+  /**
+   * Points the session's host-side handles at `input`'s sandbox. Returns false
+   * when this session cannot serve that slice, in which case the caller must
+   * discard it and rebuild from the journal rather than reattach.
+   */
+  readonly rebindToSlice: (input: CreatePiSessionInput) => Promise<boolean>;
+  readonly session: HarnessV1Session;
+}
 
 /**
  * Whether a discovered resource path belongs to a specific directory.
@@ -317,13 +341,26 @@ export async function createPiSession(
   input: CreatePiSessionInput,
 ): Promise<HarnessV1Session> {
   if (input.isResume) {
-    const parkedSession = parkedPiSessions.get(input.sessionId);
-    if (parkedSession) {
+    const parked = parkedPiSessions.get(input.sessionId);
+    if (parked) {
       parkedPiSessions.delete(input.sessionId);
-      return {
-        ...parkedSession,
-        isResume: true,
-      };
+      // A rebind that throws leaves this slice's sandbox unusable, which the
+      // fresh build below runs into as well and reports properly — so it is
+      // the same outcome as a refusal, and handling it as one keeps the parked
+      // session from being stranded live but unreachable.
+      const reattached = await parked.rebindToSlice(input).catch(() => false);
+      if (reattached) {
+        return {
+          ...parked.session,
+          isResume: true,
+        };
+      }
+      // Reattaching would leave the session addressing paths that do not exist
+      // in this slice's sandbox. Drop it and fall through to a fresh build off
+      // the persisted journal — lossy, but coherent. Destroying before the
+      // `mkdir`s below matters: both sessions derive `hostRoot` from the same
+      // session id, and `doDestroy` removes that tree.
+      await parked.session.doDestroy();
     }
   }
 
@@ -351,16 +388,36 @@ export async function createPiSession(
   await mkdir(hostAgentDir, { recursive: true });
   await mkdir(hostSessionDir, { recursive: true });
 
-  const sandbox = input.sandboxSession.restricted();
+  /*
+   * Rebound by `rebindToSlice` when this session is reattached after a pause:
+   * the sandbox it was created with is stopped by then. Everything that reaches
+   * the sandbox at turn time must read THIS binding rather than capture it, so
+   * a reattached session writes into the sandbox that is actually running — and,
+   * critically, the one whose snapshot becomes the next persisted boundary.
+   */
+  let sandbox = input.sandboxSession.restricted();
   const permissionMode = input.permissionMode ?? 'allow-all';
   let sandboxSkillRootDir: string | undefined;
   let harnessSkills: Skill[] = [];
 
-  // Materialise harness-provided skills into sandbox HOME, not the workspace.
-  if (input.skills.length > 0) {
+  /*
+   * Materialise harness-provided skills into sandbox HOME, not the workspace.
+   *
+   * Runs on every start AND on every reattach: a reattach binds this session to
+   * a sandbox restored from a snapshot, and hosts deliberately exclude the skill
+   * tree from what they persist precisely because it is rewritten here. Skipping
+   * it would leave the model with skill paths its own resource list advertises
+   * but the running sandbox does not have.
+   */
+  async function writeSkillsToSandbox(
+    abortSignal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (input.skills.length === 0) {
+      return;
+    }
     const sandboxHomeDir = await resolveSandboxHomeDir({
       sandbox,
-      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      ...(abortSignal ? { abortSignal } : {}),
     });
     sandboxSkillRootDir = path.posix.join(sandboxHomeDir, '.agents', 'skills');
     harnessSkills = createHarnessPiSkills({
@@ -371,9 +428,11 @@ export async function createPiSession(
       sandbox,
       sandboxHomeDir,
       skills: input.skills,
-      ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
+      ...(abortSignal ? { abortSignal } : {}),
     });
   }
+
+  await writeSkillsToSandbox(input.abortSignal);
 
   // On resume: pull the Pi session file out of the sandbox into the fresh
   // host mirror so SessionManager.open can read it.
@@ -631,12 +690,39 @@ export async function createPiSession(
   const pendingCompactionParts: HarnessV1StreamPart[] = [];
 
   const remoteOps = createPiRemoteOps({
-    sandbox,
+    // A getter, not the value: `remoteOps` is built once and captured by every
+    // builtin tool, so this is what carries a reattach's rebound sandbox
+    // through to the tools without rebuilding them.
+    get sandbox() {
+      return sandbox;
+    },
     paths,
     onFileChange: (event, relPath) => {
       currentEmit?.({ type: 'file-change', event, path: relPath });
     },
   });
+
+  /**
+   * Points this session at `next`'s sandbox so a reattach stops addressing the
+   * stopped one, and re-materialises what that sandbox is missing. See
+   * {@link ParkedPiSession}.
+   *
+   * Only the sandbox handle is rebindable. `sessionWorkDir` is baked into the
+   * workspace VFS mount, the path mapper, and Pi's own advertised cwd (already
+   * written into the journal and the system prompt), so a slice that resolved a
+   * different one cannot be served by this session at all — it is refused here
+   * rather than reattached onto paths the new sandbox does not have. The host
+   * derives that directory from the session id, so this is a guard, not a case
+   * the current callers reach.
+   */
+  async function rebindToSlice(next: CreatePiSessionInput): Promise<boolean> {
+    if (next.sessionWorkDir !== sessionWorkDir) {
+      return false;
+    }
+    sandbox = next.sandboxSession.restricted();
+    await writeSkillsToSandbox(next.abortSignal);
+    return true;
+  }
 
   function settlePendingToolResults(reason: string): void {
     for (const pending of pendingToolResults.values()) {
@@ -1379,7 +1465,7 @@ export async function createPiSession(
         awaitingHostToolCalls.size > 0
       ) {
         accountForPendingHostStepUsage();
-        parkedPiSessions.set(input.sessionId, sessionImpl);
+        parkedPiSessions.set(input.sessionId, { rebindToSlice, session: sessionImpl });
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.
         deferredContinuation?.resolve();
@@ -1414,7 +1500,7 @@ export async function createPiSession(
         (activeTurn == null && awaitingHostToolCalls.size > 0)
       ) {
         accountForPendingHostStepUsage();
-        parkedPiSessions.set(input.sessionId, sessionImpl);
+        parkedPiSessions.set(input.sessionId, { rebindToSlice, session: sessionImpl });
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.
         deferredContinuation?.resolve();

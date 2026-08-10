@@ -1,8 +1,12 @@
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   type AgentSession,
   type ToolDefinition,
   ModelRuntime,
+  SessionManager,
   SettingsManager,
 } from '@earendil-works/pi-coding-agent';
 import type {
@@ -78,6 +82,11 @@ describe('createPiSession', () => {
       piMock.customTools = options.customTools;
       return { session: piMock.session };
     });
+    // Restated per test: one case below points it at a real host journal so the
+    // persist path runs, and that must not leak into the others.
+    vi.mocked(SessionManager.create).mockReturnValue({
+      getSessionFile: () => undefined,
+    } as unknown as ReturnType<typeof SessionManager.create>);
   });
 
   it('rejects unsafe resume session filenames before sandbox restore', async () => {
@@ -877,7 +886,172 @@ describe('createPiSession', () => {
       );
     });
   });
+
+  /*
+   * A parked session outlives the sandbox it was built with: the host stops the
+   * harness session at the pause (stopping that sandbox) and the resume hands it
+   * a new one restored from the snapshot. Reattaching used to keep the original
+   * handle, so every later `persistSessionFile` wrote the journal into a stopped
+   * sandbox while the running one — the one whose snapshot the host stores — kept
+   * whatever it was restored with. The durable journal then never advanced, and
+   * the first cold resume replayed the model from a context missing every turn
+   * since, which the user saw as the assistant re-asking questions it had already
+   * had answered.
+   */
+  it('persists the journal into the sandbox a reattached session was resumed on', async () => {
+    const sessionId = 'session-rebind';
+    const sessionFileName = '2026-01-01T00-00-00-000Z_rebind.jsonl';
+    const hostSessionDir = path.join(
+      tmpdir(),
+      'ai-sdk-harness',
+      'pi',
+      sessionId,
+      'sessions',
+    );
+    await mkdir(hostSessionDir, { recursive: true });
+    const hostJournalPath = path.join(hostSessionDir, sessionFileName);
+    await writeFile(hostJournalPath, 'parked\n');
+    vi.mocked(SessionManager.create).mockReturnValue({
+      getSessionFile: () => hostJournalPath,
+    } as unknown as ReturnType<typeof SessionManager.create>);
+
+    const toolStarted = createDeferred<void>();
+    const prompt = vi.fn(async () => {
+      const tool = piMock.customTools.find(tool => tool.name === 'weather');
+      if (!tool) throw new Error('Expected weather tool.');
+      const pending = tool.execute(
+        'tool-1',
+        {},
+        undefined,
+        undefined,
+        undefined as never,
+      );
+      toolStarted.resolve();
+      await pending;
+    });
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt,
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const parkedSandbox = createSandboxSession();
+    const session = await createPiSession({
+      sessionId,
+      sandboxSession: parkedSandbox,
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [{ name: 'weather' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+    await toolStarted.promise;
+    await session.doSuspendTurn();
+
+    // The host stops the parked slice's sandbox; the resume gets a new one.
+    const resumedSandbox = createSandboxSession();
+    const resumed = await createPiSession({
+      sessionId,
+      sandboxSession: resumedSandbox,
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+    });
+
+    // Pi appended this slice's entries to its host journal; only a persist into
+    // the RUNNING sandbox puts them where the next cold resume will find them.
+    await writeFile(hostJournalPath, 'parked\ncontinued\n');
+    const resumedControl = await resumed.doContinueTurn({
+      tools: [{ name: 'weather' }] satisfies HarnessV1ToolSpec[],
+      emit: vi.fn(),
+    });
+    await resumedControl.submitToolResult({
+      toolCallId: 'tool-1',
+      output: { weather: 'sunny' },
+    });
+    await resumedControl.done;
+    await control.done;
+    await resumed.doStop();
+
+    expect(journalWritesTo(resumedSandbox)).toEqual(['parked\ncontinued\n']);
+    expect(journalWritesTo(parkedSandbox)).not.toContain('parked\ncontinued\n');
+  });
+
+  it('rebuilds instead of reattaching when the slice resolved a different work dir', async () => {
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt: vi.fn(async () => {}),
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const parkedSandbox = createSandboxSession();
+    const session = await createPiSession({
+      sessionId: 'session-workdir-moved',
+      sandboxSession: parkedSandbox,
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [],
+      emit: vi.fn(),
+    });
+    await control.done;
+    await session.doDetach();
+
+    const resumed = await createPiSession({
+      sessionId: 'session-workdir-moved',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/other',
+      skills: [],
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: true,
+    });
+
+    // A reattach would have handed back the parked session verbatim, still
+    // addressing `/sandbox/work` — paths the new sandbox does not have.
+    expect(resumed).not.toBe(session);
+    expect(
+      (piMock.session as unknown as { dispose: ReturnType<typeof vi.fn> })
+        .dispose,
+    ).toHaveBeenCalled();
+  });
 });
+
+/** The journal bodies a session wrote into `sandbox`, in call order. */
+function journalWritesTo(sandbox: HarnessV1NetworkSandboxSession): string[] {
+  const writeBinaryFile = vi.mocked(
+    (sandbox as unknown as { writeBinaryFile: (input: unknown) => unknown })
+      .writeBinaryFile,
+  );
+  return writeBinaryFile.mock.calls
+    .map(([input]) => input as { content: Buffer; path: string })
+    .filter(({ path: written }) => written.endsWith('.jsonl'))
+    .map(({ content }) => content.toString('utf8'));
+}
 
 function createDeferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;

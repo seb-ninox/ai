@@ -1759,6 +1759,95 @@ describe('HarnessAgent', () => {
     await session.destroy();
   });
 
+  /*
+   * A proposal the tool's schema already rejects cannot be carried out, so
+   * asking the user to authorize it only spends their decision on an action
+   * that fails either way — and the model does not learn why until after that
+   * decision, which is a step too late to repair. It is settled as a tool
+   * error instead, and never executed: skipping only the approval would run an
+   * approval-gated tool with no approval at all.
+   */
+  test('settles an approval-gated call with invalid input as a tool error instead of asking', async () => {
+    const execute = vi.fn(async ({ city }: { city: string }) => ({ city }));
+    const { harness, toolResults, toolApprovals } = mockHarness({
+      script: () => [
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 42 }),
+        },
+        ...finishEvents(),
+      ],
+    });
+    const agent = new HarnessAgent({
+      harness,
+      tools: {
+        weather: tool({
+          description: 'Get weather',
+          inputSchema: z.object({ city: z.string() }),
+          execute,
+        }),
+      },
+      toolApproval: { weather: 'user-approval' },
+      sandbox: makeSandboxProvider(),
+    });
+    const session = await agent.createSession();
+    const result = await agent.stream({ session, prompt: 'go' });
+    const parts: string[] = [];
+
+    for await (const part of result.fullStream) {
+      parts.push(part.type);
+    }
+
+    expect(parts).not.toContain('tool-approval-request');
+    expect(toolApprovals).toEqual([]);
+    expect(execute).not.toHaveBeenCalled();
+    expect(toolResults).toEqual([
+      {
+        toolCallId: 'c1',
+        output: { error: expect.any(String) },
+        isError: true,
+      },
+    ]);
+    await session.destroy();
+  });
+
+  test('still asks for approval when the input is valid', async () => {
+    const { harness } = mockHarness({
+      script: () => [
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'weather',
+          input: JSON.stringify({ city: 'SF' }),
+        },
+      ],
+    });
+    const agent = new HarnessAgent({
+      harness,
+      tools: {
+        weather: tool({
+          description: 'Get weather',
+          inputSchema: z.object({ city: z.string() }),
+          execute: async ({ city }: { city: string }) => ({ city }),
+        }),
+      },
+      toolApproval: { weather: 'user-approval' },
+      sandbox: makeSandboxProvider(),
+    });
+    const session = await agent.createSession();
+    const result = await agent.stream({ session, prompt: 'go' });
+    const parts: string[] = [];
+
+    for await (const part of result.fullStream) {
+      parts.push(part.type);
+    }
+
+    expect(parts).toContain('tool-approval-request');
+    await session.destroy();
+  });
+
   test('auto-denies inactive builtin approvals without approval stream parts', async () => {
     const { harness, toolApprovals } = mockHarness({
       builtinTools: {

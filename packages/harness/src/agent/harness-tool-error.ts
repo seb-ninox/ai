@@ -20,14 +20,35 @@ export class HarnessToolError extends Error {
   }
 }
 
+/**
+ * The `HarnessToolError` an error carries, directly or as a cause.
+ *
+ * A tool's schema rejection reaches the loop wrapped in the AI SDK's
+ * `InvalidToolInputError`, which keeps the underlying error as its `cause`. Only
+ * looking at the outer error there loses the tool's own two messages and reports
+ * the generic default to the user instead — for the one failure the tool was
+ * most specific about.
+ */
+function findHarnessToolError(error: unknown): HarnessToolError | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current != null && !seen.has(current)) {
+    if (current instanceof HarnessToolError) {
+      return current;
+    }
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
 export function getHarnessToolModelMessage(error: unknown): string {
-  return error instanceof HarnessToolError
-    ? error.modelMessage
-    : String(error);
+  return findHarnessToolError(error)?.modelMessage ?? String(error);
 }
 
 export function getHarnessToolPublicMessage(error: unknown): string {
-  return error instanceof HarnessToolError
-    ? error.publicMessage
-    : DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE;
+  return (
+    findHarnessToolError(error)?.publicMessage ??
+    DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE
+  );
 }

@@ -915,6 +915,52 @@ export function runPrompt<
             await telemetry.toolEnd(toolCall.toolCallId, { ok: true, output });
             continue;
           }
+          /*
+           * A call whose input the tool's own schema rejects can never be
+           * carried out, so it must not become an approval request: the user
+           * would be asked to authorize an action that is going to fail no
+           * matter what they answer, and the model would only learn why AFTER
+           * the decision — too late to repair within the step it proposed in.
+           * `validateToolCall` already marked it and deliberately kept it
+           * flowing rather than failing the turn; this is where that marking
+           * becomes the repairable error it was meant to be.
+           *
+           * Settled here rather than allowed to fall through to execution:
+           * skipping only the approval would run an approval-gated tool with
+           * NO approval whenever the published schema is stricter than
+           * whatever the tool itself enforces. The model gets the validation
+           * diagnostic and can reissue the call in the same turn.
+           *
+           * Only calls that would otherwise be parked take this path. A tool
+           * that needs no approval keeps reaching its own boundary, which
+           * already reports its own error. And a resumed approval can never be
+           * invalid — it parsed cleanly before it was ever parked — so the
+           * lookup below still stands.
+           */
+          if (
+            customToolApprovalDecision.type === 'request' &&
+            pendingApprovalsByToolCallId.get(toolCall.toolCallId) == null &&
+            'invalid' in parsedToolCall &&
+            parsedToolCall.invalid === true
+          ) {
+            const invalidInputError = (
+              parsedToolCall as { error?: unknown }
+            ).error;
+            publicToolErrorsByToolCallId.set(
+              toolCall.toolCallId,
+              getHarnessToolPublicMessage(invalidInputError),
+            );
+            await control.submitToolResult({
+              toolCallId: toolCall.toolCallId,
+              output: { error: getHarnessToolModelMessage(invalidInputError) },
+              isError: true,
+            });
+            await telemetry.toolEnd(toolCall.toolCallId, {
+              ok: false,
+              error: invalidInputError,
+            });
+            continue;
+          }
           const pendingApproval =
             pendingApprovalsByToolCallId.get(toolCall.toolCallId) ??
             (customToolApprovalDecision.type === 'request'

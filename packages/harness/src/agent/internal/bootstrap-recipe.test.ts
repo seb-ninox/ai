@@ -207,7 +207,7 @@ describe('applyBootstrapRecipe', () => {
     );
   });
 
-  it('resolves relative file paths and command working directories', async () => {
+  it('resolves relative paths and runs commands from the bootstrap directory', async () => {
     const relativeRecipe: HarnessV1Bootstrap = {
       harnessId: 'demo',
       bootstrapDir: '.harness-bootstrap/demo',
@@ -217,11 +217,7 @@ describe('applyBootstrapRecipe', () => {
           content: 'content',
         },
       ],
-      commands: [
-        { command: 'echo default' },
-        { command: 'echo relative', workingDirectory: 'tools' },
-        { command: 'echo absolute', workingDirectory: '/opt/tools' },
-      ],
+      commands: [{ command: 'echo first' }, { command: 'echo second' }],
     };
     const { session, readTextFile, writeTextFile, run } = makeMockSession();
 
@@ -243,8 +239,7 @@ describe('applyBootstrapRecipe', () => {
     expect(run.mock.calls.map(([args]) => args.workingDirectory)).toEqual([
       '/work',
       '/work/.harness-bootstrap/demo',
-      '/work/tools',
-      '/opt/tools',
+      '/work/.harness-bootstrap/demo',
     ]);
   });
 

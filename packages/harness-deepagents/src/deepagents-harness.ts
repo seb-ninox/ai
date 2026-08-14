@@ -59,6 +59,20 @@ const BOOTSTRAP_DIR = '.harness-bootstrap/deepagents';
  */
 const DEEPAGENTS_CLIENT_APP = `ai-sdk/harness-deepagents/${VERSION}`;
 
+export type DeepAgentsThinkingConfig =
+  | {
+      readonly type: 'adaptive';
+      readonly display?: 'summarized' | 'omitted';
+    }
+  | {
+      readonly type: 'enabled';
+      readonly budget_tokens: number;
+      readonly display?: 'summarized' | 'omitted';
+    }
+  | {
+      readonly type: 'disabled';
+    };
+
 // Pinned ripgrep release + per-arch tarball checksums (verified before install).
 const RIPGREP_VERSION = '14.1.1';
 const RIPGREP_SHA256_X64 =
@@ -92,15 +106,35 @@ export type DeepAgentsHarnessSettings = {
   readonly auth?: DeepAgentsAuthOptions;
   /** Model id for the DeepAgents runtime, e.g. `claude-sonnet-4` (converted to `provider:model`). */
   readonly model?: string;
+  /**
+   * Controls Anthropic extended thinking for the Deep Agents model. Unset
+   * preserves the Deep Agents runtime default.
+   */
+  readonly thinking?: DeepAgentsThinkingConfig;
+  /**
+   * Controls how much effort Claude applies when adaptive thinking is enabled.
+   * Unset uses the LangChain Anthropic client default.
+   */
+  readonly effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   /** Bridge port override; defaults to the sandbox's first declared port. */
   readonly port?: number;
   /** Maximum milliseconds to wait for the bridge to advertise its port. Defaults to 120000. */
   readonly startupTimeoutMs?: number;
   /**
+   * Creates the authentication token used by the sandbox bridge. Defaults to
+   * a random 32-byte hexadecimal token.
+   */
+  readonly mintBridgeToken?: (sandboxId: string) => string;
+  /**
    * Maximum LangGraph super-steps per turn before it errors.
    * When omitted, the Deep Agents default applies.
    */
   readonly recursionLimit?: number;
+  /**
+   * MCP server definitions keyed by server name. Each definition uses the
+   * underlying runtime's native MCP server configuration format.
+   */
+  readonly mcpServers?: Record<string, unknown>;
 };
 
 // Every model-callable DeepAgents built-in, keyed by what the bridge emits (commonName ?? nativeName); all must be listed or AI SDK throws AI_NoSuchToolError.
@@ -270,6 +304,8 @@ export function createDeepAgents(
             channel: attachChannel,
             proc: undefined,
             model: settings.model,
+            thinking: settings.thinking,
+            effort: settings.effort,
             bridgePort: coords.port,
             bridgeToken: coords.token,
             sandboxId,
@@ -278,6 +314,7 @@ export function createDeepAgents(
             permissionMode,
             builtinToolFiltering: startOpts.builtinToolFiltering,
             recursionLimit: settings.recursionLimit,
+            mcpServers: settings.mcpServers,
           });
         } catch {
           // Bridge no longer reachable — recover by respawning below.
@@ -285,7 +322,10 @@ export function createDeepAgents(
       }
 
       const port = resolveBridgePort(sandboxSession, settings.port);
-      const token = randomBytes(32).toString('hex');
+      const token =
+        settings.mintBridgeToken == null
+          ? randomBytes(32).toString('hex')
+          : settings.mintBridgeToken(sandboxId);
 
       // Always discover repo-provided skills under <workDir>/.agents/skills (e.g. a cloned repo); a missing dir is tolerated by deepagents.
       // Absolute paths: LocalShellBackend (non-virtual) treats a leading-slash path as a real fs path.
@@ -383,6 +423,8 @@ export function createDeepAgents(
         channel,
         proc,
         model: settings.model,
+        thinking: settings.thinking,
+        effort: settings.effort,
         bridgePort: boundPort,
         bridgeToken: token,
         sandboxId,
@@ -393,6 +435,7 @@ export function createDeepAgents(
         permissionMode,
         builtinToolFiltering: startOpts.builtinToolFiltering,
         recursionLimit: settings.recursionLimit,
+        mcpServers: settings.mcpServers,
       });
     },
   };
@@ -481,6 +524,8 @@ function createSession({
   channel,
   proc,
   model,
+  thinking,
+  effort,
   bridgePort,
   bridgeToken,
   sandboxId,
@@ -490,12 +535,15 @@ function createSession({
   permissionMode,
   builtinToolFiltering,
   recursionLimit,
+  mcpServers,
 }: {
   sessionId: string;
   channel: DeepAgentsChannel;
   // Undefined on attach — the live bridge was spawned by another process.
   proc: Experimental_SandboxProcess | undefined;
   model: string | undefined;
+  thinking: DeepAgentsThinkingConfig | undefined;
+  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined;
   bridgePort: number;
   bridgeToken: string;
   sandboxId: string;
@@ -508,6 +556,7 @@ function createSession({
   permissionMode?: HarnessV1PermissionMode;
   builtinToolFiltering?: HarnessV1BuiltinToolFiltering;
   recursionLimit?: number;
+  mcpServers?: Record<string, unknown>;
 }): HarnessV1Session {
   let stopped = false;
   let instructionsApplied = attached;
@@ -661,10 +710,13 @@ function createSession({
           inputSchema: t.inputSchema,
         })),
         ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
+        ...(effort ? { effort } : {}),
         ...(skillsPaths?.length ? { skillsPaths } : {}),
         ...(permissionMode ? { permissionMode } : {}),
         ...(builtinToolFiltering ? { builtinToolFiltering } : {}),
         ...(recursionLimit != null ? { recursionLimit } : {}),
+        ...(mcpServers == null ? {} : { mcpServers }),
       });
 
       return control;
@@ -732,7 +784,7 @@ function createSession({
         );
       }
       stopped = true;
-      await teardown(channel, proc);
+      await teardown({ channel, proc, operation: 'stop' });
       // In-memory conversation is lost on teardown; the sandbox snapshot preserves the workspace files, not the conversation.
       const payload: HarnessV1ResumeSessionState = {
         type: 'resume-session',
@@ -745,19 +797,24 @@ function createSession({
     doDestroy: async () => {
       if (stopped) return;
       stopped = true;
-      await teardown(channel, proc);
+      await teardown({ channel, proc, operation: 'destroy' });
     },
   };
 }
 
-async function teardown(
-  channel: DeepAgentsChannel,
-  proc: Experimental_SandboxProcess | undefined,
-): Promise<void> {
+async function teardown({
+  channel,
+  proc,
+  operation,
+}: {
+  channel: DeepAgentsChannel;
+  proc: Experimental_SandboxProcess | undefined;
+  operation: 'stop' | 'destroy';
+}): Promise<void> {
   channel.beginClose();
   try {
     if (!channel.isClosed()) {
-      channel.send({ type: 'shutdown' });
+      channel.send({ type: operation });
     }
   } catch {}
   let stopTimer: ReturnType<typeof setTimeout> | undefined;

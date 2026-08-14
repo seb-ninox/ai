@@ -68,6 +68,7 @@ describe('inboundMessageSchema', () => {
       inboundMessageSchema.parse({
         type: 'start',
         prompt: 'hi',
+        instructions: 'Be concise.',
         tools: [{ name: 'deploy' }],
         model: 'gpt-5.1',
         reasoningEffort: 'high',
@@ -97,11 +98,12 @@ describe('inboundMessageSchema', () => {
     ).not.toThrow();
   });
 
-  it('accepts user-message, abort, and shutdown', () => {
+  it('accepts user-message, abort, stop, and destroy', () => {
     for (const sample of [
       { type: 'user-message', text: 'hi' },
       { type: 'abort' },
-      { type: 'shutdown' },
+      { type: 'stop' },
+      { type: 'destroy' },
     ]) {
       expect(() => inboundMessageSchema.parse(sample)).not.toThrow();
     }

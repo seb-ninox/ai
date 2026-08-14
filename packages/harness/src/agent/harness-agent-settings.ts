@@ -22,8 +22,26 @@ import type {
 } from 'ai';
 import type { HarnessAllTools } from './harness-agent-tool-types';
 
+/**
+ * Resolves one custom tool call's approval status at call time, in the host
+ * process, with the call's parsed input and the per-tool context the host
+ * mapped to this tool (unvalidated — `contextSchema` validation still happens
+ * at execution). Mirrors the AI SDK's `SingleToolApprovalFunction`: return
+ * `undefined` for the same effect as the `not-applicable` status. A rejection
+ * or throw fails the turn, so resolver errors are loud rather than silently
+ * permissive.
+ */
+export type HarnessAgentToolApprovalResolver = (input: {
+  readonly toolName: string;
+  readonly input: unknown;
+  readonly context: unknown;
+}) =>
+  | ToolApprovalStatus
+  | undefined
+  | PromiseLike<ToolApprovalStatus | undefined>;
+
 export type HarnessAgentToolApprovalConfiguration = Readonly<
-  Record<string, ToolApprovalStatus>
+  Record<string, ToolApprovalStatus | HarnessAgentToolApprovalResolver>
 >;
 
 export type HarnessAgentSandboxConfig = {

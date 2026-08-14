@@ -4,6 +4,7 @@ export type {
   HarnessAgentSandboxConfig,
   HarnessAgentSettings,
   HarnessAgentToolApprovalConfiguration,
+  HarnessAgentToolApprovalResolver,
 } from '../src/agent/harness-agent-settings';
 export type {
   HarnessAgentAdapter,

@@ -887,8 +887,12 @@ export function runPrompt<
             await telemetry.toolEnd(toolCall.toolCallId, { ok: true, output });
             continue;
           }
-          const customToolApprovalDecision = resolveCustomToolApproval({
+          const customToolApprovalDecision = await resolveCustomToolApproval({
             toolName: toolCall.toolName,
+            toolInput: parsedToolCall.input,
+            toolContext: (
+              input.toolsContext as Record<string, unknown> | undefined
+            )?.[toolCall.toolName],
             toolApproval: input.toolApproval,
           });
           if (customToolApprovalDecision.type === 'deny') {
@@ -1016,6 +1020,33 @@ export function runPrompt<
               usage: toolCall.usage,
             });
             return;
+          }
+          /*
+           * An explicit `approved` status (static or resolver-returned) is a
+           * policy decision, not the absence of one, so it leaves the same
+           * automatic approval request/response pair on the stream that an
+           * automatic denial already does — with `approved: true` and the
+           * policy's reason. The consumer's transcript then records WHO (or
+           * what policy) authorized the call, which is what distinguishes an
+           * auto-approved write from a tool that never needed approval.
+           */
+          if (
+            customToolApprovalDecision.type === 'allow' &&
+            customToolApprovalDecision.recorded
+          ) {
+            const approvalId = generateId();
+            enqueueApprovalRequest({
+              approvalId,
+              toolCall: parsedToolCall,
+              isAutomatic: true,
+            });
+            enqueueAutomaticApprovalResponse({
+              approvalId,
+              toolCall: parsedToolCall,
+              approved: true,
+              reason: customToolApprovalDecision.reason,
+              providerExecuted: false,
+            });
           }
           const execution = await maybeExecuteHostTool({
             event: toolCall,

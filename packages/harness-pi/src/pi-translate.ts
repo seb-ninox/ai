@@ -17,6 +17,14 @@ export interface PiTranslatorState {
   promptStarted: boolean;
   /** Accumulated assistant text from `text_delta` events. */
   streamedAssistantText: string;
+  /**
+   * The most recent `stopReason` Pi reported on an assistant message
+   * (`message_end` / `turn_end`). Carried onto the harness finish reason so
+   * consumers see the provider's real evidence (`length`, `toolUse`, …)
+   * instead of a fabricated `stop`. `undefined` until Pi reports one; the
+   * finish reason is then an inferred `stop` marked as such in metadata.
+   */
+  lastStopReason: string | undefined;
   /** Stream-part id for the active text block; synthesized on first delta. */
   currentTextId: string | undefined;
   /**
@@ -81,6 +89,7 @@ export function createPiTranslatorState(
   return {
     promptStarted: false,
     streamedAssistantText: '',
+    lastStopReason: undefined,
     currentTextId: undefined,
     currentReasoningId: undefined,
     reasoningStarted: false,
@@ -166,6 +175,50 @@ function emptyStepUsage(): PiStepUsage {
   };
 }
 
+type PiFinishReason = Extract<
+  HarnessV1StreamPart,
+  { type: 'finish' }
+>['finishReason'];
+
+/**
+ * Pi's `stopReason` vocabulary mapped onto the unified harness finish
+ * reasons. Values Pi may add later fall through to `other` with the raw
+ * string preserved.
+ */
+const PI_STOP_REASON_TO_UNIFIED: Record<string, PiFinishReason['unified']> = {
+  aborted: 'other',
+  error: 'error',
+  length: 'length',
+  stop: 'stop',
+  toolUse: 'tool-calls',
+};
+
+/**
+ * The harness finish reason for the turn, mapped from the last `stopReason`
+ * Pi reported on an assistant message. `raw` always carries Pi's actual
+ * string — never a fabricated value. When Pi reported no reason at all the
+ * result is `stop` with `raw: undefined` and `inferred: true`, which callers
+ * record as metadata so consumers can tell evidence from a guess.
+ */
+export function piTurnFinishReason(
+  state: Pick<PiTranslatorState, 'lastStopReason'> | undefined,
+): { finishReason: PiFinishReason; inferred: boolean } {
+  const stopReason = state?.lastStopReason;
+  if (!stopReason) {
+    return {
+      finishReason: { unified: 'stop', raw: undefined },
+      inferred: true,
+    };
+  }
+  return {
+    finishReason: {
+      unified: PI_STOP_REASON_TO_UNIFIED[stopReason] ?? 'other',
+      raw: stopReason,
+    },
+    inferred: false,
+  };
+}
+
 function finishStep(
   state: PiTranslatorState,
   usage?: PiStepUsage,
@@ -175,12 +228,18 @@ function finishStep(
   state.pendingStepToolCallIds.clear();
   const resolvedUsage = state.pendingStepUsage ?? usage ?? emptyStepUsage();
   state.pendingStepUsage = undefined;
+  const { finishReason, inferred } = piTurnFinishReason(state);
   return [
     {
       type: 'finish-step',
-      finishReason: { unified: 'stop', raw: 'stop' },
+      finishReason,
       usage: resolvedUsage,
-      harnessMetadata: { pi: { inferredStep: true } },
+      harnessMetadata: {
+        pi: {
+          inferredStep: true,
+          ...(inferred ? { inferredFinishReason: true } : {}),
+        },
+      },
     },
   ];
 }
@@ -300,6 +359,7 @@ export function translatePiEvent(
         state.pendingStepToolCallIds.clear();
       }
       state.streamedAssistantText = '';
+      state.lastStopReason = undefined;
       state.currentTextId = undefined;
       state.currentReasoningId = undefined;
       state.reasoningStarted = false;
@@ -369,22 +429,45 @@ export function translatePiEvent(
       const parts: HarnessV1StreamPart[] = [];
       state.pendingStepUsage =
         extractPiStepUsage(event.message) ?? state.pendingStepUsage;
+      const stopReason = event.message?.stopReason?.trim();
+      if (stopReason) {
+        state.lastStopReason = stopReason;
+      }
       const fullText = extractAssistantText(event.message);
-      if (
-        state.currentTextId &&
+      // Text the final message carries beyond what was streamed as deltas.
+      // Covers both the gap-fill case (deltas were a prefix) and the
+      // final-only case (no deltas at all — `streamedAssistantText` is ''),
+      // which previously lost the entire response because emission was gated
+      // on an already-open text block. Emitting only a proven suffix is what
+      // keeps already-streamed text from ever being duplicated — including
+      // on the `turn_end` that follows a `message_end` for the same message.
+      const missingText =
         fullText.startsWith(state.streamedAssistantText) &&
         fullText.length > state.streamedAssistantText.length
-      ) {
-        const missing = fullText.slice(state.streamedAssistantText.length);
+          ? fullText.slice(state.streamedAssistantText.length)
+          : '';
+      let textId = state.currentTextId;
+      if (missingText) {
+        if (!textId) {
+          // Mirror the delta handler: close an open reasoning block before
+          // opening a text block, so the two never interleave.
+          if (state.reasoningStarted && state.currentReasoningId) {
+            parts.push({
+              type: 'reasoning-end',
+              id: state.currentReasoningId,
+            });
+            state.reasoningStarted = false;
+            state.currentReasoningId = undefined;
+          }
+          textId = newId();
+          state.currentTextId = textId;
+          parts.push({ type: 'text-start', id: textId });
+        }
         state.streamedAssistantText = fullText;
-        parts.push({
-          type: 'text-delta',
-          id: state.currentTextId,
-          delta: missing,
-        });
+        parts.push({ type: 'text-delta', id: textId, delta: missingText });
       }
-      if (state.currentTextId) {
-        parts.push({ type: 'text-end', id: state.currentTextId });
+      if (textId) {
+        parts.push({ type: 'text-end', id: textId });
         state.currentTextId = undefined;
       }
       if (state.reasoningStarted && state.currentReasoningId) {

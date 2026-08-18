@@ -4,6 +4,7 @@ import {
   createPiTranslatorState,
   finishPiApprovalStep,
   flushOpenStep,
+  piTurnFinishReason,
   translatePiEvent,
   type PiTranslatorState,
 } from './pi-translate';
@@ -826,5 +827,327 @@ describe('flushOpenStep', () => {
   it('is a no-op when nothing streamed at all', () => {
     const state = createPiTranslatorState();
     expect(flushOpenStep(state)).toEqual([]);
+  });
+});
+
+describe('final-only assistant text', () => {
+  it('emits a complete text block when the final message carries text never streamed', () => {
+    const state = createPiTranslatorState();
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+
+    const closing = translatePiEvent(
+      {
+        type: 'message_end',
+        message: { role: 'assistant', content: 'Full answer' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(closing[0]?.type).toBe('text-start');
+    const id = (closing[0] as { id: string }).id;
+    expect(closing[1]).toMatchObject({
+      type: 'text-delta',
+      id,
+      delta: 'Full answer',
+    });
+    expect(closing[2]).toEqual({ type: 'text-end', id });
+
+    const turnEnd = translatePiEvent(
+      { type: 'turn_end' } as PiSessionEvent,
+      state,
+    );
+    expect(turnEnd.map(p => p.type)).toEqual(['finish-step']);
+  });
+
+  it('does not re-emit text when turn_end repeats the message a message_end already completed', () => {
+    const state = createPiTranslatorState();
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'partial' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+    const messageEnd = translatePiEvent(
+      {
+        type: 'message_end',
+        message: { role: 'assistant', content: 'partial and more' },
+      } as PiSessionEvent,
+      state,
+    );
+    expect(messageEnd.map(p => p.type)).toEqual(['text-delta', 'text-end']);
+
+    const turnEnd = translatePiEvent(
+      {
+        type: 'turn_end',
+        message: { role: 'assistant', content: 'partial and more' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(turnEnd.find(p => p.type === 'text-start')).toBeUndefined();
+    expect(turnEnd.find(p => p.type === 'text-delta')).toBeUndefined();
+    expect(turnEnd.map(p => p.type)).toEqual(['finish-step']);
+  });
+
+  it('closes an open reasoning block before opening the final-only text block', () => {
+    const state = createPiTranslatorState();
+    const streamed = emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'hmm' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+    const reasoningId = (
+      streamed.find(p => p.type === 'reasoning-start') as { id: string }
+    ).id;
+
+    const closing = translatePiEvent(
+      {
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Answer' }],
+        },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(closing[0]).toEqual({ type: 'reasoning-end', id: reasoningId });
+    expect(closing[1]?.type).toBe('text-start');
+    expect(closing[2]).toMatchObject({ type: 'text-delta', delta: 'Answer' });
+    expect(closing[3]?.type).toBe('text-end');
+  });
+
+  it('opens a fresh block for the missing suffix when reasoning closed the streamed block', () => {
+    const state = createPiTranslatorState();
+    const streamed = emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'Hello' },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'x' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+    const firstTextId = (
+      streamed.find(p => p.type === 'text-start') as { id: string }
+    ).id;
+
+    const closing = translatePiEvent(
+      {
+        type: 'message_end',
+        message: { role: 'assistant', content: 'Hello world' },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(closing[0]?.type).toBe('reasoning-end');
+    expect(closing[1]?.type).toBe('text-start');
+    const suffixId = (closing[1] as { id: string }).id;
+    expect(suffixId).not.toBe(firstTextId);
+    expect(closing[2]).toMatchObject({
+      type: 'text-delta',
+      id: suffixId,
+      delta: ' world',
+    });
+    expect(closing[3]).toEqual({ type: 'text-end', id: suffixId });
+  });
+});
+
+describe('piTurnFinishReason', () => {
+  it('maps each Pi stopReason onto the unified vocabulary with the raw string preserved', () => {
+    expect(piTurnFinishReason({ lastStopReason: 'stop' })).toEqual({
+      finishReason: { unified: 'stop', raw: 'stop' },
+      inferred: false,
+    });
+    expect(piTurnFinishReason({ lastStopReason: 'length' })).toEqual({
+      finishReason: { unified: 'length', raw: 'length' },
+      inferred: false,
+    });
+    expect(piTurnFinishReason({ lastStopReason: 'toolUse' })).toEqual({
+      finishReason: { unified: 'tool-calls', raw: 'toolUse' },
+      inferred: false,
+    });
+    expect(piTurnFinishReason({ lastStopReason: 'error' })).toEqual({
+      finishReason: { unified: 'error', raw: 'error' },
+      inferred: false,
+    });
+    expect(piTurnFinishReason({ lastStopReason: 'aborted' })).toEqual({
+      finishReason: { unified: 'other', raw: 'aborted' },
+      inferred: false,
+    });
+  });
+
+  it('preserves an unknown stopReason as raw under other', () => {
+    expect(piTurnFinishReason({ lastStopReason: 'refusal' })).toEqual({
+      finishReason: { unified: 'other', raw: 'refusal' },
+      inferred: false,
+    });
+  });
+
+  it('infers stop when Pi reported no reason', () => {
+    expect(piTurnFinishReason(undefined)).toEqual({
+      finishReason: { unified: 'stop', raw: undefined },
+      inferred: true,
+    });
+    expect(piTurnFinishReason({ lastStopReason: undefined })).toEqual({
+      finishReason: { unified: 'stop', raw: undefined },
+      inferred: true,
+    });
+  });
+});
+
+describe('finish reason on finish-step', () => {
+  it('carries the closing message stopReason instead of a fabricated stop', () => {
+    const state = createPiTranslatorState();
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'cut off' },
+        } as PiSessionEvent,
+        {
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            content: 'cut off',
+            stopReason: 'length',
+          },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+
+    const turnEnd = translatePiEvent(
+      { type: 'turn_end' } as PiSessionEvent,
+      state,
+    );
+
+    expect(turnEnd[0]).toMatchObject({
+      type: 'finish-step',
+      finishReason: { unified: 'length', raw: 'length' },
+    });
+    const finishStepPart = turnEnd[0];
+    const metadata =
+      finishStepPart?.type === 'finish-step'
+        ? finishStepPart.harnessMetadata
+        : undefined;
+    expect(metadata).toEqual({ pi: { inferredStep: true } });
+  });
+
+  it('marks the finish reason inferred when Pi reported none', () => {
+    const state = createPiTranslatorState();
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'done' },
+        } as PiSessionEvent,
+        {
+          type: 'message_end',
+          message: { role: 'assistant', content: 'done' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+
+    const turnEnd = translatePiEvent(
+      { type: 'turn_end' } as PiSessionEvent,
+      state,
+    );
+
+    expect(turnEnd[0]).toMatchObject({
+      type: 'finish-step',
+      finishReason: { unified: 'stop', raw: undefined },
+      harnessMetadata: {
+        pi: { inferredStep: true, inferredFinishReason: true },
+      },
+    });
+  });
+
+  it('reports tool-calls on the step that paused for tool execution', () => {
+    const state = createPiTranslatorState({ builtinToolNames: ['bash'] });
+    emit(
+      [
+        { type: 'turn_start' } as PiSessionEvent,
+        {
+          type: 'message_start',
+          message: { role: 'assistant', content: [] },
+        } as PiSessionEvent,
+        {
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: 'c-fr', name: 'bash' }],
+            stopReason: 'toolUse',
+          },
+        } as PiSessionEvent,
+        {
+          type: 'tool_execution_start',
+          toolCallId: 'c-fr',
+          toolName: 'bash',
+          args: { command: 'pwd' },
+        } as PiSessionEvent,
+      ],
+      state,
+    );
+
+    const end = translatePiEvent(
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'c-fr',
+        result: 'ok',
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect(end.map(p => p.type)).toEqual(['tool-result', 'finish-step']);
+    expect(end[1]).toMatchObject({
+      finishReason: { unified: 'tool-calls', raw: 'toolUse' },
+    });
   });
 });

@@ -51,6 +51,7 @@ import {
   createPiTranslatorState,
   finishPiApprovalStep,
   flushOpenStep,
+  piTurnFinishReason,
   translatePiEvent,
   type PiTranslatorState,
 } from './pi-translate';
@@ -1255,14 +1256,19 @@ export async function createPiSession(
           tokenSnapshot(session),
           turnUsageBaseline ?? tokenSnapshot(session),
         );
-        const finishReason = {
-          unified: 'stop' as const,
-          raw: undefined,
-        };
+        // The provider's real stop reason (captured from the last assistant
+        // message) — `length` and friends must reach consumers instead of a
+        // hard-coded `stop`. Only when Pi reported none is `stop` inferred,
+        // and then it is marked as inferred so evidence stays distinguishable
+        // from a guess.
+        const { finishReason, inferred } = piTurnFinishReason(translatorState);
         currentEmit?.({
           type: 'finish',
           finishReason,
           totalUsage: usage,
+          ...(inferred
+            ? { harnessMetadata: { pi: { inferredFinishReason: true } } }
+            : {}),
         });
       } catch (err) {
         // A `doSuspendTurn` aborts the in-flight turn on purpose — settle silently

@@ -43,6 +43,12 @@ export type JustBashSandboxSnapshot = {
   readonly version: typeof SNAPSHOT_VERSION;
   /** Working directory the sandbox was created with. */
   readonly cwd: string;
+  /**
+   * Sandbox HOME, kept separate from the rest of the environment so snapshots
+   * do not persist caller-provided secrets. Optional for version 1 snapshots
+   * created before HOME was captured.
+   */
+  readonly homeDir?: string;
   readonly entries: readonly JustBashSnapshotEntry[];
 };
 
@@ -132,6 +138,7 @@ export async function createJustBashSnapshot(
   return {
     version: SNAPSHOT_VERSION,
     cwd: sandbox.bashEnvInstance.getCwd(),
+    homeDir: sandbox.bashEnvInstance.getEnv().HOME ?? '/',
     entries,
   };
 }
@@ -202,9 +209,20 @@ export async function restoreJustBashSandbox({
     await fs.symlink(entry.target, entry.path);
   }
 
+  const homeDir =
+    snapshot.homeDir ??
+    (snapshot.entries.some(
+      entry => entry.type === 'directory' && entry.path === '/home/user',
+    )
+      ? '/home/user'
+      : undefined);
+  const env =
+    homeDir === undefined ? options?.env : { HOME: homeDir, ...options?.env };
+
   return await Sandbox.create({
     cwd: snapshot.cwd,
     ...options,
+    ...(env === undefined ? {} : { env }),
     fs,
   });
 }

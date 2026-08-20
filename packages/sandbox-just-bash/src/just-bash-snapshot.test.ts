@@ -22,6 +22,26 @@ async function roundTrip(sandbox: Sandbox): Promise<Sandbox> {
 }
 
 describe('just-bash sandbox snapshots', () => {
+  it('preserves HOME across a snapshot round trip', async () => {
+    const sandbox = await Sandbox.create();
+
+    const restored = await roundTrip(sandbox);
+
+    expect(restored.bashEnvInstance.getEnv().HOME).toBe('/home/user');
+  });
+
+  it('recovers HOME from a legacy default-layout snapshot', async () => {
+    const sandbox = await Sandbox.create();
+    const { homeDir: _homeDir, ...legacySnapshot } =
+      await createJustBashSnapshot(sandbox);
+
+    const restored = await restoreJustBashSandbox({
+      snapshot: legacySnapshot,
+    });
+
+    expect(restored.bashEnvInstance.getEnv().HOME).toBe('/home/user');
+  });
+
   it('restores file contents and the working directory', async () => {
     const sandbox = await Sandbox.create({ cwd: '/work' });
     await sandbox.writeFiles({ '/work/notes.txt': 'hello' });

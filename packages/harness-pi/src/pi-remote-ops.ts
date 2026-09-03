@@ -234,7 +234,7 @@ export function createPiRemoteOps(options: PiRemoteOpsOptions): PiRemoteOps {
         `if [ ! -e ${shellQuote(resolvedPath)} ]; then echo "__PI_LS_NOT_FOUND__"; exit 2; fi`,
         `if [ ! -d ${shellQuote(resolvedPath)} ]; then echo "__PI_LS_NOT_DIR__"; exit 3; fi`,
         `cd ${shellQuote(resolvedPath)}`,
-        'ls -1Ap',
+        'ls -1AF',
       ].join('; '),
     );
 
@@ -244,6 +244,9 @@ export function createPiRemoteOps(options: PiRemoteOpsOptions): PiRemoteOps {
     }
     if (output.includes('__PI_LS_NOT_DIR__')) {
       throw new Error(`Not a directory: ${inputPath}`);
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(output || `Unable to list directory: ${inputPath}`);
     }
 
     return output
@@ -322,20 +325,19 @@ export function createPiRemoteOps(options: PiRemoteOpsOptions): PiRemoteOps {
     const flags = [
       '-R',
       '-n',
-      '--binary-files=without-match',
       ...(input.ignoreCase ? ['-i'] : []),
-      ...(input.literal ? ['-F'] : []),
+      ...(input.literal ? ['-F'] : ['-E']),
       ...(typeof input.context === 'number' && input.context > 0
         ? ['-C', String(input.context)]
         : []),
-      ...(input.glob ? ['--include', input.glob] : []),
+      ...(input.glob ? [`--include=${input.glob}`] : []),
     ];
     const limit = Math.max(1, input.limit ?? 100);
     const result = await runShell(
       [
         `if [ ! -e ${shellQuote(resolvedPath)} ]; then echo "__PI_GREP_NOT_FOUND__"; exit 2; fi`,
         `cd ${shellQuote(options.paths.sandboxWorkDir)}`,
-        `grep ${flags.map(shellQuote).join(' ')} -- ${shellQuote(pattern)} ${shellQuote(targetPath)} 2>/dev/null | head -n ${limit}`,
+        `grep ${flags.map(shellQuote).join(' ')} -e ${shellQuote(pattern)} ${shellQuote(targetPath)}`,
       ].join('; '),
     );
 
@@ -343,8 +345,16 @@ export function createPiRemoteOps(options: PiRemoteOpsOptions): PiRemoteOps {
     if (output.includes('__PI_GREP_NOT_FOUND__')) {
       throw new Error(`Path not found: ${input.path ?? '.'}`);
     }
+    if (result.exitCode === 1 || output.length === 0) {
+      return 'No matches found';
+    }
+    if (result.exitCode !== 0) {
+      throw new Error(
+        output || `grep failed with exit code ${String(result.exitCode)}`,
+      );
+    }
 
-    return output || 'No matches found';
+    return output.split('\n').slice(0, limit).join('\n');
   };
 
   return {

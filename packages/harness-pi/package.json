@@ -46,8 +46,10 @@
     "zod": "^3.25.76 || ^4.1.8"
   },
   "devDependencies": {
+    "@ai-sdk/sandbox-just-bash": "workspace:*",
     "@types/node": "22.19.19",
     "@vercel/ai-tsconfig": "workspace:*",
+    "just-bash": "^3.4.2",
     "tsup": "^8.5.1",
     "typescript": "5.8.3",
     "zod": "3.25.76"

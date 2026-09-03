@@ -1,5 +1,7 @@
 import type { Experimental_SandboxSession } from '@ai-sdk/provider-utils';
-import { describe, expect, it, vi } from 'vitest';
+import { createJustBashSandbox } from '@ai-sdk/sandbox-just-bash';
+import { defineCommand } from 'just-bash';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPiPathMapper } from './pi-paths';
 import { createPiRemoteOps } from './pi-remote-ops';
 
@@ -101,6 +103,51 @@ function makeOps(behaviors: Parameters<typeof makeMockSandbox>[0]) {
   });
   const ops = createPiRemoteOps({ sandbox: env.sandbox, paths });
   return { ...env, paths, ops };
+}
+
+const realSessions: Array<{ stop(): PromiseLike<void> }> = [];
+
+afterEach(async () => {
+  await Promise.all(realSessions.splice(0).map(session => session.stop()));
+});
+
+async function makeRealJustBashOps() {
+  const provider = createJustBashSandbox({
+    cwd: sandboxWorkDir,
+    customCommands: [
+      defineCommand('realpath', async (args, ctx) => {
+        const target = args.at(-1);
+        if (target == null) {
+          return {
+            exitCode: 1,
+            stderr: 'realpath: missing operand\n',
+            stdout: '',
+          };
+        }
+        try {
+          return {
+            exitCode: 0,
+            stderr: '',
+            stdout: `${await ctx.fs.realpath(target)}\n`,
+          };
+        } catch {
+          return {
+            exitCode: 1,
+            stderr: `realpath: ${target}: No such file or directory\n`,
+            stdout: '',
+          };
+        }
+      }),
+    ],
+  });
+  const networkSession = await provider.createSession();
+  realSessions.push(networkSession);
+  const sandbox = networkSession.restricted();
+  const paths = createPiPathMapper({ hostWorkDir, sandboxWorkDir });
+  return {
+    ops: createPiRemoteOps({ sandbox, paths }),
+    sandbox,
+  };
 }
 
 describe('createPiRemoteOps.readBuffer', () => {
@@ -248,16 +295,16 @@ describe('createPiRemoteOps.editFile', () => {
 });
 
 describe('createPiRemoteOps.listDirectory', () => {
-  it('uses ls -1Ap inside the sandbox and parses output (preserves trailing / for dirs)', async () => {
+  it('uses supported classification flags and preserves trailing / for dirs', async () => {
     const env = makeOps({
       run: () => ({ stdout: 'src/\nREADME.md\nnode_modules/\n' }),
     });
     const names = await env.ops.listDirectory('.');
     expect(names).toEqual(['node_modules/', 'README.md', 'src/']);
     const cmd =
-      env.runCalls.find(call => call.command.includes('ls -1Ap'))?.command ??
+      env.runCalls.find(call => call.command.includes('ls -1AF'))?.command ??
       '';
-    expect(cmd).toContain('ls -1Ap');
+    expect(cmd).toContain('ls -1AF');
   });
 
   it('throws on __PI_LS_NOT_FOUND__ sentinel', async () => {
@@ -267,6 +314,20 @@ describe('createPiRemoteOps.listDirectory', () => {
     await expect(env.ops.listDirectory('nope')).rejects.toThrow(
       /Path not found/,
     );
+  });
+
+  it('lists files and marks directories through real just-bash', async () => {
+    const { ops, sandbox } = await makeRealJustBashOps();
+    await sandbox.writeTextFile({
+      path: `${sandboxWorkDir}/README.md`,
+      content: '# Test',
+    });
+    await sandbox.run({ command: `mkdir -p ${sandboxWorkDir}/src` });
+
+    await expect(ops.listDirectory(sandboxWorkDir)).resolves.toEqual([
+      'README.md',
+      'src/',
+    ]);
   });
 });
 
@@ -293,9 +354,9 @@ describe('createPiRemoteOps.grepFiles', () => {
     expect(cmd).toContain('-i');
     expect(cmd).toContain('-F');
     expect(cmd).toContain('-C');
-    expect(cmd).toContain('--include');
-    expect(cmd).toContain('*.ts');
-    expect(cmd).toContain('head -n 50');
+    expect(cmd).toContain('--include=*.ts');
+    expect(cmd).not.toContain('--binary-files');
+    expect(cmd).not.toContain('head -n');
   });
 
   it('returns "No matches found" on empty output', async () => {
@@ -323,6 +384,39 @@ describe('createPiRemoteOps.grepFiles', () => {
     expect(env.runCalls.some(call => call.command.includes('grep '))).toBe(
       false,
     );
+  });
+
+  it('searches with extended regex and a file glob through real just-bash', async () => {
+    const { ops, sandbox } = await makeRealJustBashOps();
+    await sandbox.writeTextFile({
+      path: `${sandboxWorkDir}/language.md`,
+      content: 'length(items)\norder by date\n',
+    });
+    await sandbox.writeTextFile({
+      path: `${sandboxWorkDir}/ignored.txt`,
+      content: 'length(hidden)\n',
+    });
+
+    const output = await ops.grepFiles('length\\(|order by', {
+      path: sandboxWorkDir,
+      glob: '*.md',
+    });
+
+    expect(output).toContain('length(items)');
+    expect(output).toContain('order by date');
+    expect(output).not.toContain('length(hidden)');
+  });
+
+  it('reports invalid regex from real just-bash as an error', async () => {
+    const { ops, sandbox } = await makeRealJustBashOps();
+    await sandbox.writeTextFile({
+      path: `${sandboxWorkDir}/language.md`,
+      content: 'length(items)\n',
+    });
+
+    await expect(
+      ops.grepFiles('(', { path: `${sandboxWorkDir}/language.md` }),
+    ).rejects.toThrow(/invalid regular expression/);
   });
 });
 

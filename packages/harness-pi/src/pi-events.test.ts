@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  createPiTerminalError,
   extractAssistantText,
   getPiTerminalError,
   parseNativeEvent,
@@ -117,6 +118,23 @@ describe('getPiTerminalError', () => {
 
   it('returns undefined for normal events', () => {
     expect(getPiTerminalError({ type: 'text_delta' } as never)).toBeUndefined();
+  });
+});
+
+describe('createPiTerminalError', () => {
+  it('preserves provider request timeouts as TimeoutError', () => {
+    const error = createPiTerminalError('Request timed out.');
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe('TimeoutError');
+    expect(error.message).toBe('Request timed out.');
+  });
+
+  it('keeps unrelated terminal failures as ordinary errors', () => {
+    const error = createPiTerminalError('Provider connection failed');
+
+    expect(error.name).toBe('Error');
+    expect(error.message).toBe('Provider connection failed');
   });
 });
 

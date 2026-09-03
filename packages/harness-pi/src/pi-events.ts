@@ -111,6 +111,19 @@ export function getPiTerminalError(event: PiSessionEvent): string | undefined {
   return undefined;
 }
 
+/**
+ * Restores the error kind Pi flattens into its terminal event message.
+ * Consumers use the standard error name to distinguish a recoverable provider
+ * timeout from an ordinary stream failure.
+ */
+export function createPiTerminalError(message: string): Error {
+  const error = new Error(message);
+  if (/\brequest timed out\b/i.test(message)) {
+    error.name = 'TimeoutError';
+  }
+  return error;
+}
+
 /** Pull the assistant text from a `turn_end` / `message_end` event payload. */
 export function extractAssistantText(
   message: PiSessionEvent['message'],

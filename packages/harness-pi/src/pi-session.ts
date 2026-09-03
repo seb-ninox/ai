@@ -36,7 +36,11 @@ import {
   resolvePiEnv,
   type PiAuthOptions,
 } from './pi-auth';
-import { getPiTerminalError, parseNativeEvent } from './pi-events';
+import {
+  createPiTerminalError,
+  getPiTerminalError,
+  parseNativeEvent,
+} from './pi-events';
 import { createPiModelResolver } from './pi-model-resolver';
 import { createPiPathMapper } from './pi-paths';
 import { createPiRemoteOps, type PiRemoteOps } from './pi-remote-ops';
@@ -1233,7 +1237,10 @@ export async function createPiSession(
            * surface.
            */
           if (suspending && isAbortError(terminalError)) return;
-          currentEmit?.({ type: 'error', error: new Error(terminalError) });
+          currentEmit?.({
+            type: 'error',
+            error: createPiTerminalError(terminalError),
+          });
           return;
         }
 

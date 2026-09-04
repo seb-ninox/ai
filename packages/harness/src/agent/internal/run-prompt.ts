@@ -349,6 +349,14 @@ export function runPrompt<
       // resume it on the continuation stream. Close it here so this result is
       // well-formed; the continuation opens its own.
       closeOpenBlocks();
+      /*
+       * Every path into this pause — an approval request, a host tool that
+       * returned no result — leaves the call that caused it open, and its span
+       * belongs to this trace even though its result will not. Settle those
+       * spans as pending BEFORE the step and the turn close below, or each in
+       * turn reports a routine pause as a tool that was never settled.
+       */
+      await telemetry.pauseOpenTools();
       if (options.completeCurrentStep) {
         await completeStep({
           finishReason: toolCallsFinishReason,

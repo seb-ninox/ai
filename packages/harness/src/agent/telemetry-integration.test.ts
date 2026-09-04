@@ -17,6 +17,12 @@ import type {
 } from '../v1';
 import { HarnessAgent } from './harness-agent';
 
+/**
+ * `SpanStatusCode.UNSET` — a span that recorded no error. Inlined because
+ * `@opentelemetry/api` is not a dependency of this package.
+ */
+const SPAN_STATUS_UNSET = 0;
+
 const usage = {
   inputTokens: {
     total: 5,
@@ -425,6 +431,43 @@ describe('HarnessAgent telemetry integration', () => {
           finish_reason: 'stop',
         },
       ]),
+    );
+  });
+
+  test('ends the tool span of an approval pause without an error', async () => {
+    const harness = scriptedHarness([
+      { type: 'stream-start', modelId: 'otel-model' },
+      {
+        type: 'tool-call',
+        toolCallId: 'c1',
+        toolName: 'ask_user',
+        input: '{"question":"which app?"}',
+        providerExecuted: true,
+      },
+      { type: 'tool-approval-request', approvalId: 'a1', toolCallId: 'c1' },
+    ]);
+    const { exporter, tracer } = createSdkTracer();
+    const agent = new HarnessAgent({
+      harness,
+      sandbox: makeSandboxProvider(),
+      telemetry: {
+        isEnabled: true,
+        recordInputs: true,
+        recordOutputs: true,
+        integrations: [new OpenTelemetry({ tracer })],
+      },
+    });
+
+    const session = await agent.createSession();
+    await agent.generate({ session, prompt: 'go' });
+    await session.destroy();
+
+    // The call is parked, not failed: its result arrives on the continuation
+    // turn, so the span carries the pending marker and an unset status.
+    const toolSpan = getExportedSpan(exporter, 'execute_tool ask_user');
+    expect(toolSpan.status.code).toBe(SPAN_STATUS_UNSET);
+    expect(toolSpan.attributes['gen_ai.tool.call.result']).toBe(
+      JSON.stringify({ status: 'awaiting-host-input' }),
     );
   });
 

@@ -51,4 +51,71 @@ describe('createTurnTelemetry', () => {
     expect(stepStartNumbers).toEqual([0, 1]);
     expect(stepEndNumbers).toEqual([0, 1]);
   });
+
+  test('settles a paused tool call as pending rather than as an error', async () => {
+    const outputs: unknown[] = [];
+    const integration = {
+      onToolExecutionEnd: event => {
+        outputs.push(event.toolOutput);
+      },
+    } satisfies Telemetry;
+
+    const telemetry = createTurnTelemetry({
+      telemetry: { integrations: [integration] },
+      harnessId: 'mock',
+      modelId: 'mock-model',
+      instructions: undefined,
+      promptText: 'go',
+      runtimeContext: undefined,
+    });
+
+    await telemetry.start();
+    await telemetry.toolStart({
+      toolCallId: 'call-1',
+      toolName: 'ask_user',
+      input: { question: 'which app?' },
+    });
+    await telemetry.pauseOpenTools();
+    await telemetry.end({
+      finishReason: { unified: 'tool-calls', raw: 'tool_use' },
+      usage,
+    });
+
+    expect(outputs).toEqual([
+      { type: 'tool-result', output: { status: 'awaiting-host-input' } },
+    ]);
+  });
+
+  test('settles a tool call the turn never closed as an error', async () => {
+    const outputs: Array<{ type: string }> = [];
+    const integration = {
+      onToolExecutionEnd: event => {
+        outputs.push(event.toolOutput);
+      },
+    } satisfies Telemetry;
+
+    const telemetry = createTurnTelemetry({
+      telemetry: { integrations: [integration] },
+      harnessId: 'mock',
+      modelId: 'mock-model',
+      instructions: undefined,
+      promptText: 'go',
+      runtimeContext: undefined,
+    });
+
+    await telemetry.start();
+    await telemetry.toolStart({
+      toolCallId: 'call-1',
+      toolName: 'read',
+      input: {},
+    });
+    await telemetry.end({
+      finishReason: { unified: 'stop', raw: 'stop' },
+      usage,
+    });
+
+    expect(outputs).toEqual([
+      { type: 'error', error: new Error('tool span unclosed') },
+    ]);
+  });
 });

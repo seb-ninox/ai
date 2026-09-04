@@ -73,6 +73,15 @@ export interface TurnTelemetry {
     toolCallId: string,
     output: { ok: true; output: unknown } | { ok: false; error: unknown },
   ): Promise<void>;
+  /**
+   * The turn is pausing for host input (a tool awaiting a user's answer, or an
+   * approval the caller must decide). Every call still open belongs to that
+   * pause: its result arrives on a later turn, which is a later trace, so its
+   * span is settled here as pending rather than left to `end` — which treats a
+   * still-open call as a harness that failed to settle it, and says so as an
+   * error.
+   */
+  pauseOpenTools(): Promise<void>;
   /** The turn ended (on a harness `finish`). */
   end(info: { finishReason: unknown; usage: unknown }): Promise<void>;
   /** The turn failed. */
@@ -88,6 +97,7 @@ const NOOP: TurnTelemetry = {
     return await execute();
   },
   async toolEnd() {},
+  async pauseOpenTools() {},
   async end() {},
   async error() {},
 };
@@ -310,7 +320,17 @@ export function createTurnTelemetry(opts: {
     }
   };
 
-  const closeOpenTools = async (): Promise<void> => {
+  /*
+   * Settle every tool call still open with one outcome, so no span outlives the
+   * turn that opened it. A call is open for one of two reasons, and they are not
+   * the same event: the harness finished without settling it (a defect), or the
+   * turn is pausing and the result belongs to a later turn (routine).
+   */
+  const settleOpenTools = async (
+    toolOutput:
+      | { type: 'error'; error: Error }
+      | { type: 'tool-result'; output: unknown },
+  ): Promise<void> => {
     for (const call of openTools.values()) {
       await dispatcher.onToolExecutionEnd?.(
         cast<'onToolExecutionEnd'>({
@@ -325,12 +345,18 @@ export function createTurnTelemetry(opts: {
             dynamic: true,
           },
           toolContext: undefined,
-          toolOutput: { type: 'error', error: new Error('tool span unclosed') },
+          toolOutput,
         }),
       );
     }
     openTools.clear();
   };
+
+  const closeOpenTools = async (): Promise<void> =>
+    await settleOpenTools({
+      type: 'error',
+      error: new Error('tool span unclosed'),
+    });
 
   return {
     start,
@@ -418,6 +444,19 @@ export function createTurnTelemetry(opts: {
           toolOutput: normalizedOutput,
         }),
       );
+    },
+
+    /*
+     * A `tool-result` rather than an error: `@ai-sdk/otel` records an error
+     * output as a failed span, and a call waiting on the user has not failed.
+     * The marker output is what the span carries in place of the result the
+     * next turn will produce.
+     */
+    async pauseOpenTools() {
+      await settleOpenTools({
+        type: 'tool-result',
+        output: { status: 'awaiting-host-input' },
+      });
     },
 
     async end(info) {

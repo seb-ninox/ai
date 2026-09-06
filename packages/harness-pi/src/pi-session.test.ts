@@ -939,6 +939,219 @@ describe('createPiSession', () => {
     expect(prompt).toHaveBeenCalledWith('');
   });
 
+  it.each([
+    { recovery: true, error: false, aborted: false },
+    { recovery: false, error: true, aborted: false },
+    { recovery: true, error: true, aborted: true },
+  ])(
+    'reports the final retry outcome: $recovery',
+    async ({ recovery, error, aborted }) => {
+      const listeners = new Set<(event: unknown) => void>();
+      const publish = (event: unknown) => {
+        for (const listener of listeners) listener(event);
+      };
+      piMock.session = {
+        abort: vi.fn(async () => {}),
+        dispose: vi.fn(),
+        getSessionStats: () => ({
+          tokens: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 },
+        }),
+        subscribe: (listener: (event: unknown) => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        prompt: async () => {
+          publish({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'overloaded',
+            },
+          });
+          publish({ type: 'auto_retry_start', attempt: 1 });
+          if (aborted)
+            publish({
+              type: 'message_end',
+              message: {
+                role: 'assistant',
+                stopReason: 'aborted',
+                errorMessage: 'Operation aborted',
+              },
+            });
+          publish({ type: 'auto_retry_end', success: recovery });
+          // Text alone must not erase a failure.
+          publish({
+            type: 'message_end',
+            message: { role: 'assistant', stopReason: 'stop', content: [] },
+          });
+        },
+      } as unknown as AgentSession;
+      const session = await createPiSession({
+        sessionId: 'retry-outcome',
+        sandboxSession: createSandboxSession(),
+        sessionWorkDir: '/sandbox/work',
+        skills: [],
+        settings: {},
+        clientApp: 'test',
+        isResume: false,
+      });
+      const emit = vi.fn();
+      const control = await session.doPromptTurn({
+        prompt: 'go',
+        tools: [],
+        emit,
+      });
+      await control.done;
+      const types = emit.mock.calls.map(([part]) => part.type);
+      expect(types.includes('error')).toBe(error);
+      expect(types.filter(type => type === 'finish')).toHaveLength(
+        error ? 0 : 1,
+      );
+      await session.doDestroy();
+    },
+  );
+
+  it('dispatches a validated host call only from execute and receives its outcome', async () => {
+    const listeners = new Set<(event: unknown) => void>();
+    const publish = (event: unknown) => {
+      for (const listener of listeners) listener(event);
+    };
+    const ready = createDeferred<void>();
+    const emit = vi.fn();
+    let result: unknown;
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      subscribe: (listener: (event: unknown) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      prompt: async () => {
+        await ready.promise;
+        publish({
+          type: 'tool_execution_start',
+          toolCallId: 'valid',
+          toolName: 'applyChanges',
+          args: { revision: 1 },
+        });
+        expect(
+          emit.mock.calls.filter(([part]) => part.type === 'tool-call'),
+        ).toHaveLength(0);
+        const tool = piMock.customTools.find(
+          tool => tool.name === 'applyChanges',
+        )!;
+        const pending = tool.execute(
+          'valid',
+          { revision: 1 },
+          undefined,
+          undefined,
+          {} as Parameters<typeof tool.execute>[4],
+        );
+        expect(
+          emit.mock.calls.filter(([part]) => part.type === 'tool-call'),
+        ).toHaveLength(1);
+        await control.submitToolResult({
+          toolCallId: 'valid',
+          output: { revision: 2 },
+        });
+        result = await pending;
+        publish({
+          type: 'tool_execution_end',
+          toolCallId: 'valid',
+          toolName: 'applyChanges',
+          result,
+        });
+      },
+    } as unknown as AgentSession;
+    const session = await createPiSession({
+      sessionId: 'validated-write',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'test',
+      isResume: false,
+    });
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [{ name: 'applyChanges' }],
+      emit,
+    });
+    ready.resolve();
+    await control.done;
+    expect(result).toMatchObject({
+      content: [{ type: 'text', text: '{"revision":2}' }],
+    });
+    await session.doDestroy();
+  });
+
+  it('does not dispatch a host write rejected by native argument validation', async () => {
+    const listeners = new Set<(event: unknown) => void>();
+    const publish = (event: unknown) => {
+      for (const listener of listeners) listener(event);
+    };
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      subscribe: (listener: (event: unknown) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      prompt: async () => {
+        publish({
+          type: 'tool_execution_start',
+          toolCallId: 'invalid-write',
+          toolName: 'applyChanges',
+          args: {},
+        });
+        publish({
+          type: 'tool_execution_end',
+          toolCallId: 'invalid-write',
+          toolName: 'applyChanges',
+          isError: true,
+          result: {
+            content: [{ type: 'text', text: 'Missing required revision' }],
+          },
+        });
+      },
+    } as unknown as AgentSession;
+    const session = await createPiSession({
+      sessionId: 'rejected-write',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      skills: [],
+      settings: {},
+      clientApp: 'test',
+      isResume: false,
+    });
+    const emit = vi.fn();
+    const control = await session.doPromptTurn({
+      prompt: 'go',
+      tools: [{ name: 'applyChanges' }],
+      emit,
+    });
+    await control.done;
+    const calls = emit.mock.calls
+      .map(([part]) => part)
+      .filter(part => part.type === 'tool-call');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      toolCallId: 'invalid-write',
+      providerExecuted: true,
+    });
+    expect(emit).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'tool-result', isError: true }),
+    );
+    await session.doDestroy();
+  });
+
   it('closes the open step before terminal finish when prompt resolves without turn_end', async () => {
     const listeners: Array<(raw: unknown) => void> = [];
     const prompt = vi.fn(async () => {
@@ -1172,7 +1385,9 @@ describe('createPiSession', () => {
   describe('systemPrompt', () => {
     async function loadSystemPrompt(
       systemPrompt: string | undefined,
-      piBase: string | undefined = "You are an expert coding assistant operating inside pi.",
+      piBase:
+        | string
+        | undefined = 'You are an expert coding assistant operating inside pi.',
     ): Promise<string | undefined> {
       await createPiSession({
         sessionId: 'session-system-prompt',
@@ -1185,7 +1400,8 @@ describe('createPiSession', () => {
         ...(systemPrompt === undefined ? {} : { systemPrompt }),
       });
 
-      const override = piMock.resourceLoaderOptions.at(-1)?.systemPromptOverride;
+      const override =
+        piMock.resourceLoaderOptions.at(-1)?.systemPromptOverride;
       return override ? override(piBase) : piBase;
     }
 
@@ -1229,7 +1445,9 @@ describe('createPiSession', () => {
         sessionId: `session-skills-${String(isResume)}`,
         sandboxSession: sandbox,
         sessionWorkDir: '/sandbox/work',
-        skills: [{ name: 'demo', description: 'Demo skill.', content: 'Body.' }],
+        skills: [
+          { name: 'demo', description: 'Demo skill.', content: 'Body.' },
+        ],
         settings: {},
         clientApp: 'ai-sdk/harness-pi/0.0.0-test',
         isResume,

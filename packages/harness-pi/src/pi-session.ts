@@ -741,6 +741,10 @@ export async function createPiSession(
     | undefined;
 
   // Emit channel set at the start of every doPromptTurn and cleared on end.
+  const validatingHostCalls = new Map<
+    string,
+    ReturnType<typeof parseNativeEvent>
+  >();
   let currentEmit: ((part: HarnessV1StreamPart) => void) | undefined;
   let translatorState: PiTranslatorState | undefined;
   let activeTurn: ActivePiTurn | undefined;
@@ -1053,7 +1057,26 @@ export async function createPiSession(
         }),
       ),
       ...userTools.map(spec =>
-        buildUserToolDefinition(spec, pendingToolResults, earlyToolResults),
+        buildUserToolDefinition(
+          spec,
+          pendingToolResults,
+          earlyToolResults,
+          (toolCallId, args) => {
+            validatingHostCalls.delete(toolCallId);
+            if (!translatorState) return;
+            for (const part of translatePiEvent(
+              {
+                type: 'tool_execution_start',
+                toolCallId,
+                toolName: spec.name,
+                args,
+              },
+              translatorState,
+            )) {
+              currentEmit?.(part);
+            }
+          },
+        ),
       ),
     ];
     return {
@@ -1149,6 +1172,30 @@ export async function createPiSession(
       if (!translatorState) return;
       const event = parseNativeEvent(rawEvent);
       if (!event) return;
+      // Pi emits start before argument validation and before its execution policy.
+      // Only the custom tool's execute callback may dispatch a host write.
+      if (
+        event.type === 'tool_execution_start' &&
+        event.toolCallId &&
+        event.toolName &&
+        translatorState.hostToolNames.has(event.toolName)
+      ) {
+        validatingHostCalls.set(event.toolCallId, event);
+        return;
+      }
+      if (event.type === 'tool_execution_end' && event.toolCallId) {
+        const rejectedCall = validatingHostCalls.get(event.toolCallId);
+        if (rejectedCall) {
+          validatingHostCalls.delete(event.toolCallId);
+          for (const part of translatePiEvent(rejectedCall, translatorState)) {
+            currentEmit?.(
+              part.type === 'tool-call'
+                ? { ...part, providerExecuted: true }
+                : part,
+            );
+          }
+        }
+      }
       for (const part of translatePiEvent(event, translatorState)) {
         if (currentEmit) {
           currentEmit(part);
@@ -1195,6 +1242,7 @@ export async function createPiSession(
       hostWorkDir,
     });
 
+    validatingHostCalls.clear();
     currentEmit = turnOpts.emit;
     // Fresh translator state for the new turn — keep the tool sets the
     // session was built with.
@@ -1209,6 +1257,7 @@ export async function createPiSession(
 
     const turnPromise = (async () => {
       let terminalError: string | undefined;
+      let recoverableModelError = false;
       const session = piSession!;
 
       // We subscribed in rebuild, but the translator may need to detect
@@ -1216,9 +1265,26 @@ export async function createPiSession(
       const unsubErr = session.subscribe(raw => {
         const ev = parseNativeEvent(raw);
         if (!ev) return;
+        if (
+          ev.type === 'auto_retry_end' &&
+          ev.success === true &&
+          recoverableModelError
+        ) {
+          terminalError = undefined;
+          recoverableModelError = false;
+          return;
+        }
         const err = getPiTerminalError(ev);
-        if (err && !terminalError) {
+        // Cancellation wins over an earlier retryable error. Pi can report a
+        // successful retry reset after an aborted assistant message.
+        if (err && ev.message?.stopReason === 'aborted') {
           terminalError = err;
+          recoverableModelError = false;
+        } else if (err && !terminalError) {
+          terminalError = err;
+          recoverableModelError =
+            ev.message?.role === 'assistant' &&
+            ev.message.stopReason === 'error';
         }
       });
 
@@ -1593,7 +1659,10 @@ export async function createPiSession(
         awaitingHostToolCalls.size > 0
       ) {
         accountForPendingHostStepUsage();
-        parkedPiSessions.set(input.sessionId, { rebindToSlice, session: sessionImpl });
+        parkedPiSessions.set(input.sessionId, {
+          rebindToSlice,
+          session: sessionImpl,
+        });
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.
         deferredContinuation?.resolve();
@@ -1628,7 +1697,10 @@ export async function createPiSession(
         (activeTurn == null && awaitingHostToolCalls.size > 0)
       ) {
         accountForPendingHostStepUsage();
-        parkedPiSessions.set(input.sessionId, { rebindToSlice, session: sessionImpl });
+        parkedPiSessions.set(input.sessionId, {
+          rebindToSlice,
+          session: sessionImpl,
+        });
         // A deferred continuation still parked on host input hands over to
         // the next resume; close its stream cleanly.
         deferredContinuation?.resolve();
@@ -1955,6 +2027,7 @@ function buildUserToolDefinition(
   spec: HarnessV1ToolSpec,
   pending: Map<string, PendingToolResult>,
   early: Map<string, unknown>,
+  dispatch: (toolCallId: string, args: unknown) => void,
 ): ToolDefinition {
   const schema = spec.inputSchema ?? {
     type: 'object',
@@ -1966,7 +2039,8 @@ function buildUserToolDefinition(
     label: spec.name,
     description: spec.description ?? `User-registered tool ${spec.name}`,
     parameters: toolSpecToTypeBoxParameters(schema),
-    async execute(toolCallId) {
+    async execute(toolCallId, args) {
+      dispatch(toolCallId, args);
       /*
        * An outcome the host submitted before Pi drove this call. Returning it
        * is what makes the host tool run exactly once: without it Pi would sit

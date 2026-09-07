@@ -76,4 +76,22 @@ describe('createPi adapter', () => {
       'projectInstructions',
     );
   });
+
+  it('forwards sequentialToolCalls to the session', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({ sequentialToolCalls: true }).doStart(startOptions());
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).toMatchObject({
+      settings: { sequentialToolCalls: true },
+    });
+  });
+
+  it('omits sequentialToolCalls when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi().doStart(startOptions());
+
+    expect(
+      vi.mocked(createPiSession).mock.calls[0]?.[0].settings,
+    ).not.toHaveProperty('sequentialToolCalls');
+  });
 });

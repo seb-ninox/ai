@@ -16,6 +16,7 @@ import type {
   HarnessV1ToolSpec,
 } from '@ai-sdk/harness';
 import { createPi } from './pi-harness';
+import { sequentialToolCallsExtension } from './pi-sequential-tools';
 import { createPiSession } from './pi-session';
 
 type FakePiTool = Pick<ToolDefinition, 'name' | 'execute'>;
@@ -210,6 +211,27 @@ describe('createPiSession', () => {
       expect(callOrder).toEqual(['first', 'second']);
       expect(extensionFactoryInput?.snapshot).toEqual(extensionFactories);
       expect(extensionFactoryInput?.reference).not.toBe(extensionFactories);
+    } finally {
+      await session.doDestroy();
+    }
+  });
+
+  it('loads sequential tool handling before caller extensions', async () => {
+    const factory: ExtensionFactory = vi.fn();
+    const session = await createPi({
+      extensionFactories: [factory],
+      sequentialToolCalls: true,
+    }).doStart({
+      sessionId: 'session-sequential-tools',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+    });
+
+    try {
+      expect(piMock.extensionFactoryInputs.at(-1)?.snapshot).toEqual([
+        sequentialToolCallsExtension,
+        factory,
+      ]);
     } finally {
       await session.doDestroy();
     }

@@ -36,6 +36,7 @@ import {
   resolvePiEnv,
   type PiAuthOptions,
 } from './pi-auth';
+import { sequentialToolCallsExtension } from './pi-sequential-tools';
 import {
   createPiTerminalError,
   getPiTerminalError,
@@ -245,6 +246,7 @@ export interface PiSessionSettings {
   readonly thinkingLevel?: PiThinkingLevel;
   readonly mcpServers?: Record<string, unknown>;
   readonly extensionFactories?: ReadonlyArray<ExtensionFactory>;
+  readonly sequentialToolCalls?: boolean;
 }
 
 /**
@@ -552,6 +554,9 @@ export async function createPiSession(
    * that keeps the active runtime alive across resource-only reloads.
    */
   const extensionFactories: ExtensionFactory[] = [
+    ...(input.settings.sequentialToolCalls
+      ? [sequentialToolCallsExtension]
+      : []),
     ...(input.settings.extensionFactories ?? []),
   ];
   if (hasMcpServers) {

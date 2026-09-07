@@ -51,6 +51,17 @@ try {
 
 The adapter requires a `HarnessV1SandboxProvider`. Pi has no in-sandbox bridge, so the sandbox doesn't need to expose any ports — `@ai-sdk/sandbox-vercel` or `@ai-sdk/sandbox-just-bash` both work.
 
+## Sequential tool calls
+
+Set `sequentialToolCalls` when each Anthropic model step must observe the
+preceding tool result before choosing another tool:
+
+```ts
+const harness = createPi({
+  sequentialToolCalls: true,
+});
+```
+
 ## Inline extensions
 
 Use `extensionFactories` to load trusted inline Pi extensions for each harness session:

@@ -85,6 +85,11 @@ export type PiHarnessSettings = {
    * Filesystem-discovered user and project extensions remain disabled.
    */
   readonly extensionFactories?: ReadonlyArray<ExtensionFactory>;
+  /**
+   * Makes Anthropic tool calls sequential so each model step observes the
+   * preceding tool result before choosing another tool.
+   */
+  readonly sequentialToolCalls?: boolean;
 };
 
 const PI_BUILTIN_TOOLS = {
@@ -195,6 +200,9 @@ export function createPi(
           ...(settings.mcpServers ? { mcpServers: settings.mcpServers } : {}),
           ...(settings.extensionFactories
             ? { extensionFactories: settings.extensionFactories }
+            : {}),
+          ...(settings.sequentialToolCalls
+            ? { sequentialToolCalls: true }
             : {}),
         },
         clientApp: PI_CLIENT_APP,

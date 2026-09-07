@@ -207,6 +207,8 @@ describe('registerPiProviders', () => {
   });
 
   it('registers all known custom providers', async () => {
+    // Pinned off so an exported PI_CACHE_RETENTION cannot add a beta header here.
+    vi.stubEnv('PI_CACHE_RETENTION', '');
     const options = {
       customEnv: {
         AI_GATEWAY_API_KEY: 'gw',
@@ -238,6 +240,77 @@ describe('registerPiProviders', () => {
     expect(gatewayCall?.[1].headers).toEqual({
       'User-Agent': 'ai-sdk/harness-pi/0.0.0-test',
       'x-client-app': 'ai-sdk/harness-pi/0.0.0-test',
+    });
+  });
+
+  it('sends no anthropic headers when long cache retention is not requested', async () => {
+    vi.stubEnv('PI_CACHE_RETENTION', '');
+    const options = {
+      customEnv: { ANTHROPIC_API_KEY: 'ant' },
+    } satisfies PiAuthOptions;
+    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    const registries = await registerProviders({ options, resolvedEnv });
+
+    const anthropicCall = registries.registerProvider.mock.calls.find(
+      call => call[0] === 'anthropic',
+    );
+    // Absent rather than empty: pi-ai's own `anthropic-beta` must survive the merge.
+    expect(anthropicCall?.[1].headers).toBeUndefined();
+  });
+
+  it('sends the long-cache-TTL beta when retention is long in the ambient env', async () => {
+    vi.stubEnv('PI_CACHE_RETENTION', 'long');
+    const options = {
+      customEnv: { ANTHROPIC_API_KEY: 'ant' },
+    } satisfies PiAuthOptions;
+    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    const registries = await registerProviders({ options, resolvedEnv });
+
+    const anthropicCall = registries.registerProvider.mock.calls.find(
+      call => call[0] === 'anthropic',
+    );
+    expect(anthropicCall?.[1].headers).toEqual({
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+    });
+  });
+
+  it('sends the beta alongside an auth token without dropping it', async () => {
+    vi.stubEnv('PI_CACHE_RETENTION', 'long');
+    const options = {
+      customEnv: { ANTHROPIC_API_KEY: 'ant', ANTHROPIC_AUTH_TOKEN: 'tok' },
+    } satisfies PiAuthOptions;
+    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    const registries = await registerProviders({ options, resolvedEnv });
+
+    const anthropicCall = registries.registerProvider.mock.calls.find(
+      call => call[0] === 'anthropic',
+    );
+    expect(anthropicCall?.[1].headers).toEqual({
+      authorization: 'Bearer tok',
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+    });
+  });
+
+  it('carries PI_CACHE_RETENTION through explicit anthropic mode', async () => {
+    vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant');
+    vi.stubEnv('PI_CACHE_RETENTION', 'long');
+
+    // resolvePiEnv deliberately returns credentials only, so the retention flag reaches
+    // the registration through the process env rather than through resolvedEnv.
+    const resolvedEnv = resolvePiEnv({
+      options: 'anthropic',
+      env: { ANTHROPIC_API_KEY: 'sk-ant' },
+    });
+    expect(resolvedEnv).toEqual({ ANTHROPIC_API_KEY: 'sk-ant' });
+
+    const registries = await registerProviders({
+      options: 'anthropic',
+      resolvedEnv,
+    });
+    expect(registries.registerProvider).toHaveBeenCalledWith('anthropic', {
+      apiKey: 'sk-ant',
+      baseUrl: 'https://api.anthropic.com',
+      headers: { 'anthropic-beta': 'extended-cache-ttl-2025-04-11' },
     });
   });
 
@@ -306,6 +379,8 @@ describe('registerPiProviders', () => {
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant');
     vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'tok');
     vi.stubEnv('OPENAI_API_KEY', 'sk-oai');
+    // Pinned off so an exported PI_CACHE_RETENTION cannot add a beta header here.
+    vi.stubEnv('PI_CACHE_RETENTION', '');
 
     const resolvedEnv = resolvePiEnv({
       options: 'anthropic',

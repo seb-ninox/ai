@@ -46,6 +46,35 @@ const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const HARNESS_CLIENT_APP = `ai-sdk/harness-pi/${VERSION}`;
 
+/**
+ * The beta that makes Anthropic honour `cache_control.ttl: "1h"`.
+ *
+ * pi-ai already ASKS for the long TTL — under `PI_CACHE_RETENTION=long` it emits
+ * `cache_control: { type: 'ephemeral', ttl: '1h' }` — but it never sends this header, and
+ * without it the API ignores the `ttl` field and applies the default five minutes. The
+ * symptom is a prompt prefix that caches within a conversation and misses between them,
+ * which reads like a cache-key bug rather than an expiry.
+ *
+ * Sent as a provider header rather than added to pi-ai's own `betaFeatures`, which is where
+ * it belongs but is not ours to change. pi-ai merges provider headers AFTER its computed
+ * `anthropic-beta` with a last-wins `Object.assign`, so this REPLACES that value rather than
+ * appending to it. Gated on the retention flag for exactly that reason: only a caller that
+ * asked for a one-hour TTL can lose a beta pi-ai would have added on its own.
+ */
+const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11';
+
+/**
+ * Whether a one-hour prompt cache TTL was asked for, resolved the way pi-ai resolves it:
+ * an explicitly supplied env first, then the process env.
+ */
+function wantsLongCacheRetention(
+  customEnv: Record<string, string | undefined>,
+): boolean {
+  return (
+    (customEnv.PI_CACHE_RETENTION ?? process.env.PI_CACHE_RETENTION) === 'long'
+  );
+}
+
 function createGatewayProviderConfig({
   apiKey,
   baseUrl,
@@ -336,15 +365,24 @@ function pickAnthropicEnv(
     result.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL;
   if (env.ANTHROPIC_AUTH_TOKEN)
     result.ANTHROPIC_AUTH_TOKEN = env.ANTHROPIC_AUTH_TOKEN;
+  // Not a credential, but it decides whether the long-cache-TTL beta rides along — see
+  // EXTENDED_CACHE_TTL_BETA. Carried here so a caller-supplied env can set it explicitly
+  // instead of only through the process env.
+  if (env.PI_CACHE_RETENTION)
+    result.PI_CACHE_RETENTION = env.PI_CACHE_RETENTION;
   return result;
 }
 
 /**
  * Filters an env object down to provider-credential keys (`*_API_KEY`,
- * `*_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`). Pi does not read provider
- * credentials from the environment itself — providers are only registered
- * through `registerProvider` / `setRuntimeApiKey` — so we must extract the
- * relevant entries before handing them to `registerCustomProviders`.
+ * `*_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) plus `PI_CACHE_RETENTION`. Pi does not
+ * read provider credentials from the environment itself — providers are only
+ * registered through `registerProvider` / `setRuntimeApiKey` — so we must
+ * extract the relevant entries before handing them to
+ * `registerCustomProviders`.
+ *
+ * `PI_CACHE_RETENTION` is not a credential; it travels with them because it
+ * decides whether the long-cache-TTL beta is registered alongside the provider.
  */
 function pickProviderEnv(
   env: NodeJS.ProcessEnv | Record<string, string>,
@@ -355,7 +393,8 @@ function pickProviderEnv(
       value &&
       (key.endsWith('_API_KEY') ||
         key.endsWith('_BASE_URL') ||
-        key === 'ANTHROPIC_AUTH_TOKEN')
+        key === 'ANTHROPIC_AUTH_TOKEN' ||
+        key === 'PI_CACHE_RETENTION')
     ) {
       result[key] = value;
     }
@@ -443,6 +482,14 @@ async function registerCustomProviders({
 
   if (customEnv.ANTHROPIC_API_KEY) {
     const baseUrl = customEnv.ANTHROPIC_BASE_URL ?? DEFAULT_ANTHROPIC_BASE_URL;
+    const headers: Record<string, string> = {
+      ...(customEnv.ANTHROPIC_AUTH_TOKEN
+        ? { authorization: `Bearer ${customEnv.ANTHROPIC_AUTH_TOKEN}` }
+        : {}),
+      ...(wantsLongCacheRetention(customEnv)
+        ? { 'anthropic-beta': EXTENDED_CACHE_TTL_BETA }
+        : {}),
+    };
     await register({
       registries,
       provider: 'anthropic',
@@ -450,13 +497,9 @@ async function registerCustomProviders({
       config: {
         apiKey: customEnv.ANTHROPIC_API_KEY,
         baseUrl,
-        ...(customEnv.ANTHROPIC_AUTH_TOKEN
-          ? {
-              headers: {
-                authorization: `Bearer ${customEnv.ANTHROPIC_AUTH_TOKEN}`,
-              },
-            }
-          : {}),
+        // Still absent when there is nothing to send, so a default setup keeps sending
+        // exactly the headers pi-ai builds for itself.
+        ...(Object.keys(headers).length > 0 ? { headers } : {}),
       },
     });
   }

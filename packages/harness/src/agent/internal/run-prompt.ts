@@ -59,6 +59,14 @@ import {
   getHarnessToolPublicMessage,
 } from '../harness-tool-error';
 
+function isGeneratedOutput(value: HarnessV1StreamPart): boolean {
+  return (
+    (value.type === 'text-delta' && value.delta.length > 0) ||
+    (value.type === 'reasoning-delta' && value.delta.length > 0) ||
+    value.type === 'tool-call'
+  );
+}
+
 /**
  * Drive one prompt turn end-to-end:
  *  - call `session.doPromptTurn` via `toHarnessStream`
@@ -652,6 +660,13 @@ export function runPrompt<
           value.type !== 'error'
         ) {
           await telemetry.ensureStepOpen();
+        }
+
+        // Match AI SDK's TTFT semantics: only non-empty generated output
+        // counts, including reasoning and tool calls. Structural events and
+        // tool results do not represent model output.
+        if (isGeneratedOutput(value)) {
+          telemetry.markOutput();
         }
 
         /*

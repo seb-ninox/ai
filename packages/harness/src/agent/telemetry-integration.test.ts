@@ -222,7 +222,7 @@ describe('HarnessAgent telemetry integration', () => {
     ]);
     expect(lmEnd.performance).toEqual({
       responseTimeMs: undefined,
-      timeToFirstOutputMs: undefined,
+      timeToFirstOutputMs: expect.any(Number),
       timeBetweenOutputChunksMs: undefined,
     });
     expect(lmEnd.finishReason).toBe('stop');

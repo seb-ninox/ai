@@ -1,5 +1,5 @@
 import type { Telemetry } from 'ai';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { createTurnTelemetry } from './turn-telemetry';
 
 const usage = {
@@ -50,6 +50,82 @@ describe('createTurnTelemetry', () => {
 
     expect(stepStartNumbers).toEqual([0, 1]);
     expect(stepEndNumbers).toEqual([0, 1]);
+  });
+
+  test('reports time to the first generated output', async () => {
+    const performanceEvents: unknown[] = [];
+    const integration = {
+      onLanguageModelCallEnd: event => {
+        performanceEvents.push(event.performance);
+      },
+    } satisfies Telemetry;
+
+    vi.useFakeTimers();
+    try {
+      const telemetry = createTurnTelemetry({
+        telemetry: { integrations: [integration] },
+        harnessId: 'mock',
+        modelId: 'mock-model',
+        instructions: undefined,
+        promptText: 'go',
+        runtimeContext: undefined,
+      });
+
+      await telemetry.start();
+      await telemetry.ensureStepOpen();
+      vi.advanceTimersByTime(42);
+      telemetry.markOutput();
+      await telemetry.stepFinish({
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+        content: [{ type: 'text', text: 'done' }],
+      });
+
+      await telemetry.ensureStepOpen();
+      telemetry.markOutput();
+      await telemetry.stepFinish({
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+        content: [{ type: 'text', text: 'still done' }],
+      });
+
+      expect(performanceEvents).toEqual([
+        expect.objectContaining({ timeToFirstOutputMs: 42 }),
+        expect.objectContaining({ timeToFirstOutputMs: undefined }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('leaves time to first output absent when the step has no output', async () => {
+    const performanceEvents: unknown[] = [];
+    const integration = {
+      onLanguageModelCallEnd: event => {
+        performanceEvents.push(event.performance);
+      },
+    } satisfies Telemetry;
+
+    const telemetry = createTurnTelemetry({
+      telemetry: { integrations: [integration] },
+      harnessId: 'mock',
+      modelId: 'mock-model',
+      instructions: undefined,
+      promptText: 'go',
+      runtimeContext: undefined,
+    });
+
+    await telemetry.start();
+    await telemetry.ensureStepOpen();
+    await telemetry.stepFinish({
+      finishReason: { unified: 'stop', raw: 'stop' },
+      usage,
+      content: [],
+    });
+
+    expect(performanceEvents).toEqual([
+      expect.objectContaining({ timeToFirstOutputMs: undefined }),
+    ]);
   });
 
   test('settles a paused tool call as pending rather than as an error', async () => {

@@ -27,6 +27,10 @@ type EventArg<K extends keyof Dispatcher> = Dispatcher[K] extends
   ? E
   : never;
 
+function now(): number {
+  return globalThis?.performance?.now() ?? Date.now();
+}
+
 /**
  * An output content part accumulated over a step — the model's assistant turn.
  * Shaped for the gen_ai output-message conventions `@ai-sdk/otel` reads.
@@ -45,6 +49,8 @@ export interface TurnTelemetry {
   start(modelId?: string): Promise<void>;
   /** Open a step span lazily, before the first content of a step. */
   ensureStepOpen(): Promise<void>;
+  /** Mark the first generated model output for this turn. Idempotent. */
+  markOutput(): void;
   /** Close the current step (on a harness `finish-step`). */
   stepFinish(info: {
     finishReason: unknown;
@@ -91,6 +97,7 @@ export interface TurnTelemetry {
 const NOOP: TurnTelemetry = {
   async start() {},
   async ensureStepOpen() {},
+  markOutput() {},
   async stepFinish() {},
   async toolStart() {},
   async executeTool({ execute }) {
@@ -189,6 +196,8 @@ export function createTurnTelemetry(opts: {
   ];
 
   let started = false;
+  let turnStartTimestampMs: number | undefined;
+  let firstOutputTimestampMs: number | undefined;
   let stepOpen = false;
   let stepNumber = 0;
   let ended = false;
@@ -215,6 +224,7 @@ export function createTurnTelemetry(opts: {
   const fireStart = async (): Promise<void> => {
     if (started) return;
     started = true;
+    turnStartTimestampMs = now();
     await dispatcher.onStart?.(
       cast<'onStart'>({
         callId,
@@ -298,7 +308,12 @@ export function createTurnTelemetry(opts: {
           : {}),
         performance: {
           responseTimeMs: undefined,
-          timeToFirstOutputMs: undefined,
+          timeToFirstOutputMs:
+            stepNumber !== 0 ||
+            firstOutputTimestampMs == null ||
+            turnStartTimestampMs == null
+              ? undefined
+              : firstOutputTimestampMs - turnStartTimestampMs,
           timeBetweenOutputChunksMs: undefined,
         },
       }),
@@ -361,6 +376,11 @@ export function createTurnTelemetry(opts: {
   return {
     start,
     ensureStepOpen,
+    markOutput() {
+      if (firstOutputTimestampMs == null) {
+        firstOutputTimestampMs = now();
+      }
+    },
 
     async stepFinish(info) {
       if (!stepOpen) return;

@@ -8,6 +8,7 @@ import {
   type AgentSession,
   type AgentToolResult,
   type ExtensionFactory,
+  type PromptOptions,
   type Skill,
   type ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
@@ -70,7 +71,7 @@ import {
 } from './pi-translate';
 import { toolSpecToTypeBoxParameters } from './pi-typebox-adapter';
 import {
-  extractUserText,
+  extractUserPrompt,
   safePiMetadataSegment,
   serializeToolOutput,
 } from './pi-utils';
@@ -1433,6 +1434,8 @@ export async function createPiSession(
    */
   async function runTurn(turnOpts: {
     text: string;
+    /** Image attachments for this turn, if the user sent any. */
+    images?: ReadonlyArray<NonNullable<PromptOptions['images']>[number]>;
     model?: string;
     skills: ReadonlyArray<HarnessV1Skill>;
     tools: ReadonlyArray<HarnessV1ToolSpec>;
@@ -1605,7 +1608,19 @@ export async function createPiSession(
         });
 
         try {
-          await session.prompt(turnOpts.text);
+          /*
+           * The options argument is omitted entirely on the text-only path.
+           * Pi defaults every field of `PromptOptions`, so passing an explicit
+           * `undefined` changes nothing for Pi — but it does change the call
+           * shape, and the text path is the one every turn takes.
+           */
+          if (turnOpts.images && turnOpts.images.length > 0) {
+            await session.prompt(turnOpts.text, {
+              images: [...turnOpts.images],
+            });
+          } else {
+            await session.prompt(turnOpts.text);
+          }
 
           if (terminalError) {
             /*
@@ -1761,8 +1776,10 @@ export async function createPiSession(
           harnessId: HARNESS_ID,
         });
       }
+      const { text, images } = extractUserPrompt(promptOpts.prompt);
       return runTurn({
-        text: extractUserText(promptOpts.prompt),
+        text,
+        ...(images.length > 0 ? { images } : {}),
         ...(promptOpts.model ? { model: promptOpts.model } : {}),
         skills: promptOpts.skills,
         tools: promptOpts.tools ?? [],

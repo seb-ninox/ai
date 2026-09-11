@@ -710,6 +710,55 @@ describe('createPiSession', () => {
     expect(mcpAdapterMock.mcpExtensionFactory).toHaveBeenCalledOnce();
   });
 
+  it('forwards image parts to Pi as prompt attachments', async () => {
+    const prompt = vi.fn(async () => {});
+    piMock.session = {
+      abort: vi.fn(async () => {}),
+      bindExtensions: vi.fn(async () => {}),
+      compact: vi.fn(async () => {}),
+      dispose: vi.fn(),
+      getActiveToolNames: vi.fn(() => []),
+      getSessionStats: () => ({
+        tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      }),
+      prompt,
+      reload: vi.fn(async () => {}),
+      setActiveToolsByName: vi.fn(),
+      steer: vi.fn(async () => {}),
+      subscribe: vi.fn(() => () => {}),
+    } as unknown as AgentSession;
+
+    const session = await createPiSession({
+      sessionId: 'session-images',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const control = await session.doPromptTurn({
+      skills: [],
+      tools: [],
+      prompt: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'what is in this screenshot?' },
+          {
+            type: 'image',
+            image: new Uint8Array([1, 2, 3]),
+            mediaType: 'image/png',
+          },
+        ],
+      },
+      emit: vi.fn(),
+    });
+    await control.done;
+
+    expect(prompt).toHaveBeenCalledWith('what is in this screenshot?', {
+      images: [{ type: 'image', data: 'AQID', mimeType: 'image/png' }],
+    });
+  });
+
   it('parks a pending tool turn on suspend and resumes it in-process', async () => {
     const toolStarted = createDeferred<void>();
     let resolvedToolResult: unknown;

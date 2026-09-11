@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HarnessCapabilityUnsupportedError } from '@ai-sdk/harness';
 import {
-  extractUserText,
+  extractUserPrompt,
   frameInstructions,
   renderPiSkillFile,
   safePiMetadataSegment,
@@ -23,13 +23,16 @@ describe('frameInstructions', () => {
   });
 });
 
-describe('extractUserText', () => {
+describe('extractUserPrompt', () => {
   it('returns the string prompt verbatim', () => {
-    expect(extractUserText('hello there')).toBe('hello there');
+    expect(extractUserPrompt('hello there')).toEqual({
+      text: 'hello there',
+      images: [],
+    });
   });
 
   it('joins multiple text parts with double newlines', () => {
-    const text = extractUserText({
+    const { text } = extractUserPrompt({
       role: 'user',
       content: [
         { type: 'text', text: 'first' },
@@ -40,23 +43,107 @@ describe('extractUserText', () => {
   });
 
   it('handles a single string content', () => {
-    expect(extractUserText({ role: 'user', content: 'just text' })).toBe(
-      'just text',
-    );
+    expect(extractUserPrompt({ role: 'user', content: 'just text' })).toEqual({
+      text: 'just text',
+      images: [],
+    });
   });
 
-  it('throws HarnessCapabilityUnsupportedError on non-text parts', () => {
+  it('converts an image part with raw bytes to a Pi attachment', () => {
+    const { text, images } = extractUserPrompt({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this' },
+        {
+          type: 'image',
+          image: new Uint8Array([1, 2, 3]),
+          mediaType: 'image/png',
+        },
+      ],
+    });
+    expect(text).toBe('what is this');
+    expect(images).toEqual([
+      { type: 'image', data: 'AQID', mimeType: 'image/png' },
+    ]);
+  });
+
+  it('strips a data URL prefix and prefers its media type', () => {
+    const { images } = extractUserPrompt({
+      role: 'user',
+      content: [
+        {
+          type: 'image',
+          image: 'data:image/webp;base64,AQID',
+        },
+      ],
+    });
+    expect(images).toEqual([
+      { type: 'image', data: 'AQID', mimeType: 'image/webp' },
+    ]);
+  });
+
+  it('accepts a file part carrying an image', () => {
+    const { images } = extractUserPrompt({
+      role: 'user',
+      content: [
+        {
+          type: 'file',
+          data: { type: 'data', data: new Uint8Array([1, 2, 3]) },
+          mediaType: 'image/jpeg',
+          filename: 'photo.jpg',
+        },
+      ],
+    });
+    expect(images).toEqual([
+      { type: 'image', data: 'AQID', mimeType: 'image/jpeg' },
+    ]);
+  });
+
+  it('sniffs the subtype when the media type is only the top-level segment', () => {
+    // 8-byte PNG signature.
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+    const { images } = extractUserPrompt({
+      role: 'user',
+      content: [{ type: 'image', image: png, mediaType: 'image' }],
+    });
+    expect(images[0]?.mimeType).toBe('image/png');
+  });
+
+  it('refuses a PDF file part', () => {
     expect(() =>
-      extractUserText({
+      extractUserPrompt({
         role: 'user',
         content: [
-          { type: 'text', text: 'before' },
+          {
+            type: 'file',
+            data: new Uint8Array([1, 2]),
+            mediaType: 'application/pdf',
+          },
+        ],
+      }),
+    ).toThrowError(HarnessCapabilityUnsupportedError);
+  });
+
+  it('refuses an image referenced by URL', () => {
+    expect(() =>
+      extractUserPrompt({
+        role: 'user',
+        content: [
           {
             type: 'image',
-            image: new Uint8Array([1, 2]),
+            image: new URL('https://example.com/a.png'),
             mediaType: 'image/png',
           },
         ],
+      }),
+    ).toThrowError(HarnessCapabilityUnsupportedError);
+  });
+
+  it('refuses an image whose media type cannot be resolved', () => {
+    expect(() =>
+      extractUserPrompt({
+        role: 'user',
+        content: [{ type: 'image', image: 'AQID' }],
       }),
     ).toThrowError(HarnessCapabilityUnsupportedError);
   });

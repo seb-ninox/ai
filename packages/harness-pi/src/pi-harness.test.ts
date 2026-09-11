@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  HarnessV1NetworkSandboxSession,
-  HarnessV1Session,
-} from '@ai-sdk/harness';
+import type { HarnessV1NetworkSandboxSession } from '@ai-sdk/harness';
 import { createPi } from './pi-harness';
 import { createPiSession } from './pi-session';
+import type * as PiSessionModule from './pi-session';
 
-vi.mock('./pi-session', () => ({
-  createPiSession: vi.fn(async () => ({}) as HarnessV1Session),
+const mocks = vi.hoisted(() => ({
+  createPiSession: vi.fn(async () => ({})),
 }));
+
+vi.mock('./pi-session', async importOriginal => {
+  const actual = await importOriginal<typeof PiSessionModule>();
+  return { ...actual, createPiSession: mocks.createPiSession };
+});
 
 function startOptions() {
   return {

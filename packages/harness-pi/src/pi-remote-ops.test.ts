@@ -350,7 +350,8 @@ describe('createPiRemoteOps.grepFiles', () => {
     const cmd =
       env.runCalls.find(call => call.command.includes('grep '))?.command ?? '';
     expect(cmd).toContain('grep');
-    expect(cmd).toContain('-R');
+    expect(cmd).toContain('-r');
+    expect(cmd).not.toContain('-R');
     expect(cmd).toContain('-i');
     expect(cmd).toContain('-F');
     expect(cmd).toContain('-C');

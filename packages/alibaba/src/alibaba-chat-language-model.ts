@@ -219,7 +219,7 @@ export class AlibabaChatLanguageModel implements LanguageModelV4 {
       for (const toolCall of choice.message.tool_calls) {
         content.push({
           type: 'tool-call',
-          toolCallId: toolCall.id ?? generateId(),
+          toolCallId: toolCall.id || generateId(),
           toolName: toolCall.function.name,
           input: toolCall.function.arguments!,
         });
@@ -379,7 +379,7 @@ export class AlibabaChatLanguageModel implements LanguageModelV4 {
             }
 
             // Handle tool call streaming
-            if (delta.tool_calls != null) {
+            if (delta.tool_calls != null && delta.tool_calls.length > 0) {
               // End any active reasoning or text before tool calls
               if (activeReasoningId != null) {
                 controller.enqueue({

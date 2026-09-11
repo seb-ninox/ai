@@ -2,18 +2,13 @@ import {
   commonTool,
   type HarnessV1,
   type HarnessV1BuiltinTool,
-  type HarnessV1ContinueTurnState,
 } from '@ai-sdk/harness';
 import { tool } from '@ai-sdk/provider-utils';
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import { z } from 'zod/v4';
-import type { PiAuthOptions } from './pi-auth';
+import type { PiAuthenticationMode } from './pi-auth';
 import { piResumeStateSchema } from './pi-resume-state';
-import {
-  createPiSession,
-  type PiPendingHostToolCall,
-  type PiThinkingLevel,
-} from './pi-session';
+import { createPiSession, type PiThinkingLevel } from './pi-session';
 import { VERSION } from './version';
 
 /**
@@ -27,13 +22,7 @@ const PI_CLIENT_APP = `ai-sdk/harness-pi/${VERSION}`;
  */
 export type PiHarnessSettings = {
   /** Where Pi sources API keys / gateway credentials from. */
-  readonly auth?: PiAuthOptions;
-  /**
-   * Pi model id (or name). Leaving this unset falls back to the AI Gateway
-   * default when `AI_GATEWAY_API_KEY` / `VERCEL_OIDC_TOKEN` is set, and to
-   * Pi's own resolution otherwise.
-   */
-  readonly model?: string;
+  readonly auth?: PiAuthenticationMode;
   /**
    * Pi's extended-thinking budget level. Maps directly to the SDK's
    * `thinkingLevel` option on `createAgentSession`.
@@ -182,18 +171,12 @@ export function createPi(
       const resumeData = lifecycleState?.data as
         | { sessionFileName?: string }
         | undefined;
-      const pendingHostToolCalls = collectPendingHostToolCalls(
-        startOpts.continueFrom ?? startOpts.resumeFrom?.continueFrom,
-      );
-
       return createPiSession({
         sessionId: startOpts.sessionId,
         sandboxSession: startOpts.sandboxSession,
         sessionWorkDir: startOpts.sessionWorkDir,
-        skills: startOpts.skills ?? [],
         settings: {
           ...(settings.auth ? { auth: settings.auth } : {}),
-          ...(settings.model ? { model: settings.model } : {}),
           ...(settings.thinkingLevel
             ? { thinkingLevel: settings.thinkingLevel }
             : {}),
@@ -204,6 +187,7 @@ export function createPi(
           ...(settings.sequentialToolCalls
             ? { sequentialToolCalls: true }
             : {}),
+          ...(startOpts.headers ? { headers: startOpts.headers } : {}),
         },
         clientApp: PI_CLIENT_APP,
         isResume: lifecycleState != null,
@@ -212,7 +196,6 @@ export function createPi(
         ...(resumeData?.sessionFileName
           ? { resumeSessionFileName: resumeData.sessionFileName }
           : {}),
-        ...(pendingHostToolCalls.length > 0 ? { pendingHostToolCalls } : {}),
         ...(startOpts.abortSignal
           ? { abortSignal: startOpts.abortSignal }
           : {}),
@@ -226,34 +209,4 @@ export function createPi(
       });
     },
   };
-}
-
-/**
- * The recorded host tool calls a continuation must settle before the rebuilt
- * Pi session may re-drive its turn (see `PiPendingHostToolCall`): custom-tool
- * approvals still undecided, plus host executions still without a result.
- * Builtin approvals are excluded — they gate Pi-executed tools, so no
- * host-submitted result exists to wait for.
- */
-function collectPendingHostToolCalls(
-  continueFrom: HarnessV1ContinueTurnState | undefined,
-): PiPendingHostToolCall[] {
-  if (continueFrom == null) return [];
-  const byToolCallId = new Map<string, PiPendingHostToolCall>();
-  for (const approval of continueFrom.pendingToolApprovals ?? []) {
-    if (approval.kind !== 'custom') continue;
-    byToolCallId.set(approval.toolCallId, {
-      toolCallId: approval.toolCallId,
-      toolName: approval.toolName,
-      input: approval.input,
-    });
-  }
-  for (const pendingResult of continueFrom.pendingToolResults ?? []) {
-    byToolCallId.set(pendingResult.toolCallId, {
-      toolCallId: pendingResult.toolCallId,
-      toolName: pendingResult.toolName,
-      input: pendingResult.input,
-    });
-  }
-  return [...byToolCallId.values()];
 }

@@ -31,6 +31,7 @@ import {
   type GatewayGenerationInfoParams,
   type GatewayGenerationInfo,
 } from './gateway-generation-info';
+import { GatewayBatch } from './gateway-batch';
 import { GatewayLanguageModel } from './gateway-language-model';
 import { GatewayEmbeddingModel } from './gateway-embedding-model';
 import { GatewayImageModel } from './gateway-image-model';
@@ -53,8 +54,8 @@ import { gatewayTools } from './gateway-tools';
 import { getVercelOidcToken, getVercelRequestId } from './vercel-environment';
 import type { GatewayModelId } from './gateway-language-model-settings';
 import type {
-  LanguageModelV4,
   EmbeddingModelV4,
+  Experimental_BatchV4 as BatchV4,
   ImageModelV4,
   RerankingModelV4,
   SpeechModelV4,
@@ -63,6 +64,7 @@ import type {
   Experimental_RealtimeFactoryV4 as RealtimeFactoryV4,
   Experimental_RealtimeFactoryV4GetTokenOptions as RealtimeFactoryV4GetTokenOptions,
   ProviderV4,
+  LanguageModelV4,
 } from '@ai-sdk/provider';
 import { VERSION } from './version';
 
@@ -78,6 +80,9 @@ export interface GatewayProvider extends ProviderV4 {
    * Creates a model for text generation.
    */
   languageModel(modelId: GatewayModelId): LanguageModelV4;
+
+  /** Returns a BatchV4 interface for processing batches with AI Gateway. */
+  experimental_batch(): BatchV4<{ text: GatewayModelId }>;
 
   /**
    * Returns available providers and models for use with the remote provider.
@@ -426,6 +431,15 @@ export function createGateway(
     });
   };
 
+  const createBatch = () =>
+    new GatewayBatch({
+      provider: 'gateway',
+      baseURL,
+      headers: getHeaders,
+      fetch: options.fetch,
+      o11yHeaders: createO11yHeaders(),
+    });
+
   const getAvailableModels = async () => {
     const now = options._internal?.currentDate?.().getTime() ?? Date.now();
     if (!pendingMetadata || now - lastFetchTime > cacheRefreshMillis) {
@@ -522,6 +536,7 @@ export function createGateway(
     });
   };
   provider.languageModel = createLanguageModel;
+  provider.experimental_batch = createBatch;
   const createEmbeddingModel = (modelId: GatewayEmbeddingModelId) => {
     return new GatewayEmbeddingModel(modelId, {
       provider: 'gateway',

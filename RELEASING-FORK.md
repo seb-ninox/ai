@@ -2,11 +2,11 @@
 
 This fork patches three packages:
 
-| Package                     | Why it is forked                                                             |
-| --------------------------- | ---------------------------------------------------------------------------- |
-| `@ai-sdk/harness`           | tool context delivery, self-contained stream blocks, sandbox workdir quoting |
-| `@ai-sdk/harness-pi`        | dependency bump to `pi-coding-agent` 0.82.1                                  |
-| `@ai-sdk/sandbox-just-bash` | durable sessions, `just-bash` 3.2.0                                          |
+| Package                     | Why it is forked                                                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ai-sdk/harness`           | tool context delivery, self-contained stream blocks, sandbox workdir quoting                                                              |
+| `@ai-sdk/harness-pi`        | sequential tool calls, `systemPrompt`/`projectInstructions`, cache-TTL beta, real stop reasons + usage, approval-flow and host-tool fixes |
+| `@ai-sdk/sandbox-just-bash` | durable sessions, `just-bash` 3.2.0                                                                                                       |
 
 Nothing else in the workspace is changed, and nothing else is published.
 

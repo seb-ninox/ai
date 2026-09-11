@@ -1,18 +1,9 @@
 import type { Telemetry } from 'ai';
+import { createNullLanguageModelUsage, DefaultStepResult } from 'ai/internal';
 import { describe, expect, test, vi } from 'vitest';
-import { createTurnTelemetry } from './turn-telemetry';
+import { createTurnLifecycle } from './turn-telemetry';
 
-const usage = {
-  inputTokens: {
-    total: 1,
-    noCache: 1,
-    cacheRead: undefined,
-    cacheWrite: undefined,
-  },
-  outputTokens: { total: 1, text: 1, reasoning: undefined },
-};
-
-describe('createTurnTelemetry', () => {
+describe('createTurnLifecycle', () => {
   test('includes the current stepNumber on onStepEnd events', async () => {
     const stepStartNumbers: number[] = [];
     const stepEndNumbers: number[] = [];
@@ -24,29 +15,58 @@ describe('createTurnTelemetry', () => {
         stepEndNumbers.push(event.stepNumber);
       },
     } satisfies Telemetry;
-
-    const telemetry = createTurnTelemetry({
+    const lifecycle = createTurnLifecycle({
+      callId: 'call-1',
       telemetry: { integrations: [integration] },
+      callbacks: {},
       harnessId: 'mock',
       modelId: 'mock-model',
       instructions: undefined,
-      promptText: 'go',
-      runtimeContext: undefined,
+      tools: {},
+      toolsContext: {},
+      activeToolNames: [],
+      toolSpecs: [],
+      messages: [{ role: 'user', content: 'go' }],
+      runtimeContext: {},
+      output: undefined,
     });
 
-    await telemetry.start();
-    await telemetry.ensureStepOpen();
-    await telemetry.stepFinish({
-      finishReason: { unified: 'stop', raw: 'stop' },
-      usage,
-      content: [{ type: 'text', text: 'done' }],
-    });
-
-    await telemetry.ensureStepOpen();
-    await telemetry.end({
-      finishReason: { unified: 'stop', raw: 'stop' },
-      usage,
-    });
+    for (const stepNumber of [0, 1]) {
+      await lifecycle.ensureStepOpen();
+      await lifecycle.stepEnd(
+        new DefaultStepResult({
+          callId: 'call-1',
+          stepNumber,
+          provider: 'harness:mock',
+          modelId: 'mock-model',
+          runtimeContext: {},
+          toolsContext: {},
+          content: [],
+          finishReason: 'stop',
+          rawFinishReason: 'stop',
+          usage: createNullLanguageModelUsage(),
+          performance: {
+            effectiveOutputTokensPerSecond: 0,
+            outputTokensPerSecond: undefined,
+            inputTokensPerSecond: undefined,
+            effectiveTotalTokensPerSecond: 0,
+            stepTimeMs: 0,
+            responseTimeMs: 0,
+            toolExecutionMs: {},
+            timeToFirstOutputMs: undefined,
+          },
+          warnings: undefined,
+          request: {},
+          response: {
+            id: `response-${stepNumber}`,
+            modelId: 'mock-model',
+            timestamp: new Date(0),
+            messages: [],
+          },
+          providerMetadata: undefined,
+        }),
+      );
+    }
 
     expect(stepStartNumbers).toEqual([0, 1]);
     expect(stepEndNumbers).toEqual([0, 1]);
@@ -62,31 +82,73 @@ describe('createTurnTelemetry', () => {
 
     vi.useFakeTimers();
     try {
-      const telemetry = createTurnTelemetry({
+      const lifecycle = createTurnLifecycle({
+        callId: 'call-1',
         telemetry: { integrations: [integration] },
+        callbacks: {},
         harnessId: 'mock',
         modelId: 'mock-model',
         instructions: undefined,
-        promptText: 'go',
-        runtimeContext: undefined,
+        tools: {},
+        toolsContext: {},
+        activeToolNames: [],
+        toolSpecs: [],
+        messages: [{ role: 'user', content: 'go' }],
+        runtimeContext: {},
+        output: undefined,
       });
 
-      await telemetry.start();
-      await telemetry.ensureStepOpen();
+      await lifecycle.start();
+      await lifecycle.ensureStepOpen();
       vi.advanceTimersByTime(42);
-      telemetry.markOutput();
-      await telemetry.stepFinish({
-        finishReason: { unified: 'stop', raw: 'stop' },
-        usage,
+      lifecycle.markOutput();
+      await lifecycle.languageModelCallEnd({
+        finishReason: 'stop',
+        usage: createNullLanguageModelUsage(),
         content: [{ type: 'text', text: 'done' }],
+        providerMetadata: undefined,
       });
+      await lifecycle.stepEnd(
+        new DefaultStepResult({
+          callId: 'call-1',
+          stepNumber: 0,
+          provider: 'harness:mock',
+          modelId: 'mock-model',
+          runtimeContext: {},
+          toolsContext: {},
+          content: [],
+          finishReason: 'stop',
+          rawFinishReason: 'stop',
+          usage: createNullLanguageModelUsage(),
+          performance: {
+            effectiveOutputTokensPerSecond: 0,
+            outputTokensPerSecond: undefined,
+            inputTokensPerSecond: undefined,
+            effectiveTotalTokensPerSecond: 0,
+            stepTimeMs: 0,
+            responseTimeMs: 0,
+            toolExecutionMs: {},
+            timeToFirstOutputMs: undefined,
+          },
+          warnings: undefined,
+          request: {},
+          response: {
+            id: 'response-0',
+            modelId: 'mock-model',
+            timestamp: new Date(0),
+            messages: [],
+          },
+          providerMetadata: undefined,
+        }),
+      );
 
-      await telemetry.ensureStepOpen();
-      telemetry.markOutput();
-      await telemetry.stepFinish({
-        finishReason: { unified: 'stop', raw: 'stop' },
-        usage,
+      await lifecycle.ensureStepOpen();
+      lifecycle.markOutput();
+      await lifecycle.languageModelCallEnd({
+        finishReason: 'stop',
+        usage: createNullLanguageModelUsage(),
         content: [{ type: 'text', text: 'still done' }],
+        providerMetadata: undefined,
       });
 
       expect(performanceEvents).toEqual([
@@ -106,21 +168,29 @@ describe('createTurnTelemetry', () => {
       },
     } satisfies Telemetry;
 
-    const telemetry = createTurnTelemetry({
+    const lifecycle = createTurnLifecycle({
+      callId: 'call-1',
       telemetry: { integrations: [integration] },
+      callbacks: {},
       harnessId: 'mock',
       modelId: 'mock-model',
       instructions: undefined,
-      promptText: 'go',
-      runtimeContext: undefined,
+      tools: {},
+      toolsContext: {},
+      activeToolNames: [],
+      toolSpecs: [],
+      messages: [{ role: 'user', content: 'go' }],
+      runtimeContext: {},
+      output: undefined,
     });
 
-    await telemetry.start();
-    await telemetry.ensureStepOpen();
-    await telemetry.stepFinish({
-      finishReason: { unified: 'stop', raw: 'stop' },
-      usage,
+    await lifecycle.start();
+    await lifecycle.ensureStepOpen();
+    await lifecycle.languageModelCallEnd({
+      finishReason: 'stop',
+      usage: createNullLanguageModelUsage(),
       content: [],
+      providerMetadata: undefined,
     });
 
     expect(performanceEvents).toEqual([
@@ -130,68 +200,55 @@ describe('createTurnTelemetry', () => {
 
   test('settles a paused tool call as pending rather than as an error', async () => {
     const outputs: unknown[] = [];
+    const startedToolCallIds: string[] = [];
     const integration = {
+      onToolExecutionStart: event => {
+        startedToolCallIds.push(event.toolCall.toolCallId);
+      },
       onToolExecutionEnd: event => {
         outputs.push(event.toolOutput);
       },
     } satisfies Telemetry;
 
-    const telemetry = createTurnTelemetry({
+    const lifecycle = createTurnLifecycle({
+      callId: 'call-1',
       telemetry: { integrations: [integration] },
+      callbacks: {},
       harnessId: 'mock',
       modelId: 'mock-model',
       instructions: undefined,
-      promptText: 'go',
-      runtimeContext: undefined,
+      tools: {},
+      toolsContext: {},
+      activeToolNames: [],
+      toolSpecs: [],
+      messages: [{ role: 'user', content: 'go' }],
+      runtimeContext: {},
+      output: undefined,
     });
 
-    await telemetry.start();
-    await telemetry.toolStart({
-      toolCallId: 'call-1',
-      toolName: 'ask_user',
-      input: { question: 'which app?' },
-    });
-    await telemetry.pauseOpenTools();
-    await telemetry.end({
-      finishReason: { unified: 'tool-calls', raw: 'tool_use' },
-      usage,
+    await lifecycle.start();
+    await lifecycle.pauseOpenTools({
+      toolCalls: [
+        {
+          type: 'tool-call',
+          toolCallId: 'call-1',
+          toolName: 'ask_user',
+          input: { question: 'which app?' },
+          dynamic: true,
+        },
+      ] as never,
     });
 
+    expect(startedToolCallIds).toEqual(['call-1']);
     expect(outputs).toEqual([
-      { type: 'tool-result', output: { status: 'awaiting-host-input' } },
-    ]);
-  });
-
-  test('settles a tool call the turn never closed as an error', async () => {
-    const outputs: Array<{ type: string }> = [];
-    const integration = {
-      onToolExecutionEnd: event => {
-        outputs.push(event.toolOutput);
+      {
+        type: 'tool-result',
+        toolCallId: 'call-1',
+        toolName: 'ask_user',
+        input: { question: 'which app?' },
+        dynamic: true,
+        output: { status: 'awaiting-host-input' },
       },
-    } satisfies Telemetry;
-
-    const telemetry = createTurnTelemetry({
-      telemetry: { integrations: [integration] },
-      harnessId: 'mock',
-      modelId: 'mock-model',
-      instructions: undefined,
-      promptText: 'go',
-      runtimeContext: undefined,
-    });
-
-    await telemetry.start();
-    await telemetry.toolStart({
-      toolCallId: 'call-1',
-      toolName: 'read',
-      input: {},
-    });
-    await telemetry.end({
-      finishReason: { unified: 'stop', raw: 'stop' },
-      usage,
-    });
-
-    expect(outputs).toEqual([
-      { type: 'error', error: new Error('tool span unclosed') },
     ]);
   });
 });

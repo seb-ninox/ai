@@ -33,14 +33,8 @@ export {
   DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE,
   HarnessToolError,
 } from '../src/agent/harness-tool-error';
-export {
-  collectHarnessAgentToolApprovalContinuations,
-  type HarnessAgentToolApprovalContinuation,
-} from '../src/agent/harness-agent-tool-approval-continuation';
-export {
-  collectHarnessAgentToolResultContinuations,
-  type HarnessAgentToolResultContinuation,
-} from '../src/agent/harness-agent-tool-result-continuation';
+export { collectHarnessAgentToolApprovalContinuations } from '../src/agent/harness-agent-tool-approval-continuation';
+export { collectHarnessAgentToolResultContinuations } from '../src/agent/harness-agent-tool-result-continuation';
 export {
   prepareHarnessSandboxTemplate,
   prewarmHarness,

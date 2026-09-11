@@ -278,26 +278,24 @@ describe('addAdditionalPropertiesToJsonSchema', () => {
     });
   });
 
-  it('preserves schema-valued additionalProperties for record values', () => {
+  it('preserves schema-valued additionalProperties recursively', () => {
     const schema: JSONSchema7 = {
       type: 'object',
-      properties: {
-        labels: {
-          type: 'object',
-          propertyNames: { type: 'string' },
-          additionalProperties: { type: 'string' },
+      additionalProperties: {
+        type: 'object',
+        properties: {
+          value: { type: 'string' },
         },
       },
     };
 
     expect(addAdditionalPropertiesToJsonSchema(schema)).toEqual({
       type: 'object',
-      additionalProperties: false,
-      properties: {
-        labels: {
-          type: 'object',
-          propertyNames: { type: 'string' },
-          additionalProperties: { type: 'string' },
+      additionalProperties: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          value: { type: 'string' },
         },
       },
     });

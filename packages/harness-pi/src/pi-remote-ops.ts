@@ -323,7 +323,7 @@ export function createPiRemoteOps(options: PiRemoteOpsOptions): PiRemoteOps {
         ? resolvedPath
         : relativeTarget;
     const flags = [
-      '-R',
+      '-r',
       '-n',
       ...(input.ignoreCase ? ['-i'] : []),
       ...(input.literal ? ['-F'] : ['-E']),

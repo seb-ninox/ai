@@ -5,12 +5,26 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  createPiModelRuntime,
   registerPiProviders,
   resolvePiEnv,
-  type PiAuthOptions,
+  type PiAuthenticationMode,
 } from './pi-auth';
 
 const authPaths: string[] = [];
+
+function clearAmbientProviderCredentials() {
+  for (const key of Object.keys(process.env)) {
+    if (
+      key.endsWith('_API_KEY') ||
+      key.endsWith('_BASE_URL') ||
+      key === 'ANTHROPIC_AUTH_TOKEN' ||
+      key === 'VERCEL_OIDC_TOKEN'
+    ) {
+      vi.stubEnv(key, undefined);
+    }
+  }
+}
 
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -36,25 +50,29 @@ async function makeRegistries() {
 async function registerProviders({
   options,
   resolvedEnv,
+  headers,
 }: {
-  options: PiAuthOptions | undefined;
+  options: PiAuthenticationMode | undefined;
   resolvedEnv: Record<string, string>;
+  headers?: Readonly<Record<string, string>>;
 }) {
   const registries = await makeRegistries();
   await registerPiProviders({
     options,
     resolvedEnv,
     registries,
+    headers,
   });
   return registries;
 }
 
 describe('resolvePiEnv', () => {
-  it('uses explicit gateway settings when configured', () => {
+  it('uses a supplied gateway authentication environment', () => {
     expect(
       resolvePiEnv({
         options: {
-          gateway: { apiKey: 'gw-key', baseUrl: 'https://gw.example' },
+          AI_GATEWAY_API_KEY: 'gw-key',
+          AI_GATEWAY_BASE_URL: 'https://gw.example',
         },
         env: {},
       }),
@@ -64,11 +82,14 @@ describe('resolvePiEnv', () => {
     });
   });
 
-  it('uses env gateway auth when explicit gateway only sets base URL', () => {
+  it('resolves OIDC gateway auth from a supplied authentication environment', () => {
     expect(
       resolvePiEnv({
-        options: { gateway: { baseUrl: 'https://gw.example' } },
-        env: { VERCEL_OIDC_TOKEN: 'oidc-env' },
+        options: {
+          AI_GATEWAY_BASE_URL: 'https://gw.example',
+          VERCEL_OIDC_TOKEN: 'oidc-env',
+        },
+        env: {},
       }),
     ).toEqual({
       AI_GATEWAY_API_KEY: 'oidc-env',
@@ -76,15 +97,13 @@ describe('resolvePiEnv', () => {
     });
   });
 
-  it('returns only gateway values from customEnv', () => {
+  it('returns only gateway values when auto-selecting from an authentication environment', () => {
     expect(
       resolvePiEnv({
         options: {
-          customEnv: {
-            AI_GATEWAY_API_KEY: 'gw',
-            OPENAI_API_KEY: 'oai',
-            ANTHROPIC_API_KEY: 'ant',
-          },
+          AI_GATEWAY_API_KEY: 'gw',
+          OPENAI_API_KEY: 'oai',
+          ANTHROPIC_API_KEY: 'ant',
         },
         env: {},
       }),
@@ -123,6 +142,26 @@ describe('resolvePiEnv', () => {
 
   it('returns {} when no auth is configured anywhere', () => {
     expect(resolvePiEnv({ options: undefined, env: {} })).toEqual({});
+  });
+
+  it('uses a supplied authentication environment instead of ambient credentials', () => {
+    expect(
+      resolvePiEnv({
+        options: { OPENAI_API_KEY: 'programmatic-openai-key' },
+        env: { AI_GATEWAY_API_KEY: 'ambient-gateway-key' },
+      }),
+    ).toEqual({ OPENAI_API_KEY: 'programmatic-openai-key' });
+  });
+
+  it('rejects nested authentication objects before reading ambient credentials', () => {
+    expect(() =>
+      resolvePiEnv({
+        options: { gateway: { apiKey: 'legacy-key' } } as never,
+        env: { AI_GATEWAY_API_KEY: 'ambient-gateway-key' },
+      }),
+    ).toThrow(
+      'Invalid auth: expected an authentication mode or a flat record with string values.',
+    );
   });
 
   it('supports string authentication modes', () => {
@@ -167,26 +206,126 @@ describe('resolvePiEnv', () => {
       MISTRAL_BASE_URL: 'https://api.mistral.example',
     });
   });
+});
 
-  it('warns when passing a legacy object shape', () => {
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    resolvePiEnv({ options: { gateway: {} }, env: {} });
-    expect(spy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        'Passing an object to auth options is deprecated',
-      ),
+describe('createPiModelRuntime', () => {
+  it('does not use ambient credentials for an empty authentication environment override', async () => {
+    clearAmbientProviderCredentials();
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-openai-key');
+    vi.stubEnv('AWS_PROFILE', 'ambient-aws-profile');
+    const authPath = path.join(
+      tmpdir(),
+      `harness-pi-auth-${randomUUID()}.json`,
     );
-    spy.mockRestore();
+    authPaths.push(authPath);
+
+    const modelRuntime = await createPiModelRuntime({
+      auth: {},
+      authPath,
+      modelsPath: `${authPath}.models`,
+    });
+
+    await expect(modelRuntime.getAuth('openai')).resolves.toBeUndefined();
+    await expect(
+      modelRuntime.getAuth('amazon-bedrock'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('uses credentials exclusively from an authentication environment override', async () => {
+    clearAmbientProviderCredentials();
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-openai-key');
+    vi.stubEnv('AWS_PROFILE', 'ambient-aws-profile');
+    const authPath = path.join(
+      tmpdir(),
+      `harness-pi-auth-${randomUUID()}.json`,
+    );
+    authPaths.push(authPath);
+
+    const modelRuntime = await createPiModelRuntime({
+      auth: {
+        OPENAI_API_KEY: 'override-openai-key',
+        AWS_PROFILE: 'override-aws-profile',
+        CUSTOM_PROVIDER_SETTING: 'override-setting',
+      },
+      authPath,
+      modelsPath: `${authPath}.models`,
+    });
+
+    await expect(modelRuntime.getAuth('openai')).resolves.toMatchObject({
+      auth: { apiKey: 'override-openai-key' },
+      env: {
+        OPENAI_API_KEY: 'override-openai-key',
+        AWS_PROFILE: 'override-aws-profile',
+        CUSTOM_PROVIDER_SETTING: 'override-setting',
+      },
+      source: 'OPENAI_API_KEY',
+    });
+    await expect(modelRuntime.getAuth('amazon-bedrock')).resolves.toMatchObject(
+      {
+        auth: {},
+        env: {
+          OPENAI_API_KEY: 'override-openai-key',
+          AWS_PROFILE: 'override-aws-profile',
+          CUSTOM_PROVIDER_SETTING: 'override-setting',
+        },
+        source: 'AWS_PROFILE',
+      },
+    );
+  });
+
+  it('preserves ambient credential lookup for auto authentication', async () => {
+    clearAmbientProviderCredentials();
+    vi.stubEnv('OPENAI_API_KEY', 'ambient-openai-key');
+    const authPath = path.join(
+      tmpdir(),
+      `harness-pi-auth-${randomUUID()}.json`,
+    );
+    authPaths.push(authPath);
+
+    const modelRuntime = await createPiModelRuntime({
+      auth: 'auto',
+      authPath,
+      modelsPath: `${authPath}.models`,
+    });
+
+    await expect(modelRuntime.getAuth('openai')).resolves.toMatchObject({
+      auth: { apiKey: 'ambient-openai-key' },
+      source: 'OPENAI_API_KEY',
+    });
   });
 });
 
 describe('registerPiProviders', () => {
+  it('does not register ambient providers for a supplied authentication environment', async () => {
+    clearAmbientProviderCredentials();
+    vi.stubEnv('AI_GATEWAY_API_KEY', 'ambient-gateway-key');
+    const options = {
+      OPENAI_API_KEY: 'programmatic-openai-key',
+    } satisfies PiAuthenticationMode;
+    const resolvedEnv = resolvePiEnv({ options, env: process.env });
+    const registries = await registerProviders({ options, resolvedEnv });
+
+    expect(registries.setRuntimeApiKey).toHaveBeenCalledTimes(1);
+    expect(registries.setRuntimeApiKey).toHaveBeenCalledWith(
+      'openai',
+      'programmatic-openai-key',
+    );
+  });
+
   it('registers resolved gateway auth', async () => {
     const options = {
-      gateway: { apiKey: 'gw-key', baseUrl: 'https://gw.example' },
-    } satisfies PiAuthOptions;
+      AI_GATEWAY_API_KEY: 'gw-key',
+      AI_GATEWAY_BASE_URL: 'https://gw.example',
+    } satisfies PiAuthenticationMode;
     const resolvedEnv = resolvePiEnv({ options, env: {} });
-    const registries = await registerProviders({ options, resolvedEnv });
+    const registries = await registerProviders({
+      options,
+      resolvedEnv,
+      headers: {
+        'x-tenant': 'acme',
+        'User-Agent': 'caller-agent',
+      },
+    });
 
     expect(registries.setRuntimeApiKey).toHaveBeenCalledWith(
       'vercel-ai-gateway',
@@ -199,6 +338,7 @@ describe('registerPiProviders', () => {
         baseUrl: 'https://gw.example',
         authHeader: true,
         headers: {
+          'x-tenant': 'acme',
           'User-Agent': 'ai-sdk/harness-pi/0.0.0-test',
           'x-client-app': 'ai-sdk/harness-pi/0.0.0-test',
         },
@@ -209,15 +349,16 @@ describe('registerPiProviders', () => {
   it('registers all known custom providers', async () => {
     // Pinned off so an exported PI_CACHE_RETENTION cannot add a beta header here.
     vi.stubEnv('PI_CACHE_RETENTION', '');
-    const options = {
-      customEnv: {
+    const options = 'custom' satisfies PiAuthenticationMode;
+    const resolvedEnv = resolvePiEnv({
+      options,
+      env: {
         AI_GATEWAY_API_KEY: 'gw',
         OPENAI_API_KEY: 'oai',
         ANTHROPIC_API_KEY: 'ant',
         ANTHROPIC_AUTH_TOKEN: 'tok',
       },
-    } satisfies PiAuthOptions;
-    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    });
     const registries = await registerProviders({ options, resolvedEnv });
     const registeredProviders = registries.registerProvider.mock.calls
       .map(call => call[0])
@@ -246,8 +387,8 @@ describe('registerPiProviders', () => {
   it('sends no anthropic headers when long cache retention is not requested', async () => {
     vi.stubEnv('PI_CACHE_RETENTION', '');
     const options = {
-      customEnv: { ANTHROPIC_API_KEY: 'ant' },
-    } satisfies PiAuthOptions;
+      ANTHROPIC_API_KEY: 'ant',
+    } satisfies PiAuthenticationMode;
     const resolvedEnv = resolvePiEnv({ options, env: {} });
     const registries = await registerProviders({ options, resolvedEnv });
 
@@ -261,8 +402,8 @@ describe('registerPiProviders', () => {
   it('sends the long-cache-TTL beta when retention is long in the ambient env', async () => {
     vi.stubEnv('PI_CACHE_RETENTION', 'long');
     const options = {
-      customEnv: { ANTHROPIC_API_KEY: 'ant' },
-    } satisfies PiAuthOptions;
+      ANTHROPIC_API_KEY: 'ant',
+    } satisfies PiAuthenticationMode;
     const resolvedEnv = resolvePiEnv({ options, env: {} });
     const registries = await registerProviders({ options, resolvedEnv });
 
@@ -274,24 +415,50 @@ describe('registerPiProviders', () => {
     });
   });
 
-  it('sends the beta alongside an auth token without dropping it', async () => {
-    vi.stubEnv('PI_CACHE_RETENTION', 'long');
+  it('prefers the supplied authentication environment over the ambient retention flag', async () => {
+    vi.stubEnv('PI_CACHE_RETENTION', '');
     const options = {
-      customEnv: { ANTHROPIC_API_KEY: 'ant', ANTHROPIC_AUTH_TOKEN: 'tok' },
-    } satisfies PiAuthOptions;
+      ANTHROPIC_API_KEY: 'ant',
+      PI_CACHE_RETENTION: 'long',
+    } satisfies PiAuthenticationMode;
     const resolvedEnv = resolvePiEnv({ options, env: {} });
+    // Not a credential, so it does not travel through the resolved env.
+    expect(resolvedEnv).toEqual({ ANTHROPIC_API_KEY: 'ant' });
     const registries = await registerProviders({ options, resolvedEnv });
 
     const anthropicCall = registries.registerProvider.mock.calls.find(
       call => call[0] === 'anthropic',
     );
     expect(anthropicCall?.[1].headers).toEqual({
+      'anthropic-beta': 'extended-cache-ttl-2025-04-11',
+    });
+  });
+
+  it('sends the beta alongside an auth token and caller headers without dropping either', async () => {
+    vi.stubEnv('PI_CACHE_RETENTION', 'long');
+    const options = {
+      ANTHROPIC_API_KEY: 'ant',
+      ANTHROPIC_AUTH_TOKEN: 'tok',
+    } satisfies PiAuthenticationMode;
+    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    const registries = await registerProviders({
+      options,
+      resolvedEnv,
+      headers: { 'x-tenant': 'acme' },
+    });
+
+    const anthropicCall = registries.registerProvider.mock.calls.find(
+      call => call[0] === 'anthropic',
+    );
+    expect(anthropicCall?.[1].headers).toEqual({
+      'x-tenant': 'acme',
       authorization: 'Bearer tok',
       'anthropic-beta': 'extended-cache-ttl-2025-04-11',
     });
   });
 
   it('carries PI_CACHE_RETENTION through explicit anthropic mode', async () => {
+    clearAmbientProviderCredentials();
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant');
     vi.stubEnv('PI_CACHE_RETENTION', 'long');
 
@@ -315,13 +482,14 @@ describe('registerPiProviders', () => {
   });
 
   it('registers arbitrary custom providers with API key and base URL', async () => {
-    const options = {
-      customEnv: {
+    const options = 'custom' satisfies PiAuthenticationMode;
+    const resolvedEnv = resolvePiEnv({
+      options,
+      env: {
         MISTRAL_API_KEY: 'mk',
         MISTRAL_BASE_URL: 'https://api.mistral.example',
       },
-    } satisfies PiAuthOptions;
-    const resolvedEnv = resolvePiEnv({ options, env: {} });
+    });
     const registries = await registerProviders({ options, resolvedEnv });
 
     expect(registries.setRuntimeApiKey).toHaveBeenCalledWith('mistral', 'mk');
@@ -333,6 +501,8 @@ describe('registerPiProviders', () => {
   });
 
   it('does not register providers when no auth is configured', async () => {
+    clearAmbientProviderCredentials();
+
     const registries = await registerProviders({
       options: undefined,
       resolvedEnv: {},
@@ -360,6 +530,7 @@ describe('registerPiProviders', () => {
     const registries = await registerProviders({
       options: 'openai',
       resolvedEnv,
+      headers: { 'x-tenant': 'acme' },
     });
     const providers = registries.registerProvider.mock.calls.map(c => c[0]);
 
@@ -372,15 +543,16 @@ describe('registerPiProviders', () => {
       apiKey: 'sk-oai',
       baseUrl: 'https://api.openai.com/v1',
       authHeader: true,
+      headers: { 'x-tenant': 'acme' },
     });
   });
 
   it('registers only anthropic when anthropic mode is explicit', async () => {
+    // Pinned off so an exported PI_CACHE_RETENTION cannot add a beta header here.
+    vi.stubEnv('PI_CACHE_RETENTION', '');
     vi.stubEnv('ANTHROPIC_API_KEY', 'sk-ant');
     vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'tok');
     vi.stubEnv('OPENAI_API_KEY', 'sk-oai');
-    // Pinned off so an exported PI_CACHE_RETENTION cannot add a beta header here.
-    vi.stubEnv('PI_CACHE_RETENTION', '');
 
     const resolvedEnv = resolvePiEnv({
       options: 'anthropic',
@@ -398,6 +570,7 @@ describe('registerPiProviders', () => {
     const registries = await registerProviders({
       options: 'anthropic',
       resolvedEnv,
+      headers: { 'x-tenant': 'acme' },
     });
     const providers = registries.registerProvider.mock.calls.map(c => c[0]);
 
@@ -405,7 +578,10 @@ describe('registerPiProviders', () => {
     expect(registries.registerProvider).toHaveBeenCalledWith('anthropic', {
       apiKey: 'sk-ant',
       baseUrl: 'https://api.anthropic.com',
-      headers: { authorization: 'Bearer tok' },
+      headers: {
+        'x-tenant': 'acme',
+        authorization: 'Bearer tok',
+      },
     });
   });
 
@@ -519,6 +695,7 @@ describe('registerPiProviders', () => {
   });
 
   it('custom mode registers all provider env vars including gateway', async () => {
+    clearAmbientProviderCredentials();
     vi.stubEnv('AI_GATEWAY_API_KEY', 'gw');
     vi.stubEnv('OPENAI_API_KEY', 'sk-oai');
     vi.stubEnv('MISTRAL_API_KEY', 'mk');

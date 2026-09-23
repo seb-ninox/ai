@@ -48,6 +48,9 @@ type FakeSystemPromptOverride = (
   base: string | undefined,
 ) => string | undefined;
 
+type FakeSkill = { name: string; description: string; filePath: string };
+type FakeSkillsResult = { skills: FakeSkill[]; diagnostics: unknown[] };
+
 type ResourceLoaderOptions = {
   readonly agentsFilesOverride?: FakeAgentsFilesOverride;
   readonly appendSystemPromptOverride?: (base: string[]) => string[];
@@ -59,12 +62,15 @@ type ResourceLoaderOptions = {
   readonly noExtensions?: boolean;
   readonly noPromptTemplates?: boolean;
   readonly noThemes?: boolean;
+  readonly skillsOverride?: (base: FakeSkillsResult) => FakeSkillsResult;
 };
 
 const piMock = vi.hoisted(() => {
   const extensionHandlers = new Map<string, Array<() => unknown>>();
   return {
     agentSessionExtensionResults: [] as FakeExtensionsResult[],
+    /** The loader's skill list as each createAgentSession call saw it. */
+    agentSessionSkills: [] as Array<Array<Pick<FakeSkill, 'name' | 'filePath'>>>,
     createAgentSession: vi.fn(),
     customTools: [] as FakePiTool[],
     appendSystemPrompts: [] as string[][],
@@ -108,6 +114,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
         extensions: [],
         runtime: {},
       };
+      private skills: FakeSkill[] = [];
 
       constructor(private readonly options: ResourceLoaderOptions) {
         piMock.resourceLoaderOptions.push(options);
@@ -128,10 +135,17 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
         }
         const base = { errors: [], extensions: [], runtime: {} };
         this.extensionsResult = this.options.extensionsOverride?.(base) ?? base;
+        const skillsBase: FakeSkillsResult = { skills: [], diagnostics: [] };
+        this.skills = (this.options.skillsOverride?.(skillsBase) ?? skillsBase)
+          .skills;
       }
 
       getExtensions() {
         return this.extensionsResult;
+      }
+
+      getSkills(): FakeSkillsResult {
+        return { skills: this.skills, diagnostics: [] };
       }
     },
     defineTool: vi.fn(tool => tool),
@@ -160,6 +174,7 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
 describe('createPiSession', () => {
   beforeEach(() => {
     piMock.agentSessionExtensionResults = [];
+    piMock.agentSessionSkills = [];
     piMock.customTools = [];
     piMock.appendSystemPrompts = [];
     piMock.extensionFactoryInputs = [];
@@ -173,6 +188,11 @@ describe('createPiSession', () => {
     piMock.createAgentSession.mockImplementation(async options => {
       piMock.agentSessionExtensionResults.push(
         options.resourceLoader.getExtensions(),
+      );
+      piMock.agentSessionSkills.push(
+        options.resourceLoader
+          .getSkills()
+          .skills.map(({ name, filePath }: FakeSkill) => ({ name, filePath })),
       );
       piMock.customTools = options.customTools;
       return { session: piMock.session };
@@ -447,6 +467,103 @@ describe('createPiSession', () => {
             '---\nname: demo-skill\ndescription: Demo skill description\n---\n\nSkill instructions content',
         }),
       );
+    } finally {
+      await session.doDestroy();
+    }
+  });
+
+  /*
+   * Pi copies the resource loader's skill list into the system prompt when it builds an
+   * AgentSession, and the loader is reloaded once at session start — before any turn has
+   * declared skills. Unless the first build is preceded by a reload that sees them, the
+   * model gets no `<available_skills>` section and has no way to locate a SKILL.md: the
+   * sandbox work dir is empty and the skill root is a readable root, not a search root.
+   */
+  it('builds the first Pi session with the harness skills already loaded', async () => {
+    piMock.session = createFakePiSession().session;
+    const session = await createPiSession({
+      sessionId: 'session-skills-first-build',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+
+    try {
+      const control = await session.doPromptTurn({
+        skills: [
+          {
+            name: 'demo-skill',
+            description: 'Demo skill description',
+            content: 'Skill instructions content',
+          },
+        ],
+        prompt: 'test prompt',
+        tools: [],
+        emit: vi.fn(),
+      });
+      await control.done;
+
+      expect(piMock.agentSessionSkills).toEqual([
+        [
+          {
+            name: 'demo-skill',
+            filePath: '/sandbox/home/.agents/skills/demo-skill/SKILL.md',
+          },
+        ],
+      ]);
+    } finally {
+      await session.doDestroy();
+    }
+  });
+
+  it('rebuilds a live session\u2019s prompt only when the skill set changes', async () => {
+    const setActiveToolsByName = vi.fn();
+    piMock.session = Object.assign(createFakePiSession().session, {
+      getActiveToolNames: vi.fn(() => ['read']),
+      setActiveToolsByName,
+    });
+    const session = await createPiSession({
+      sessionId: 'session-skills-live-change',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      settings: {},
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+    const demoSkill = {
+      name: 'demo-skill',
+      description: 'Demo skill description',
+      content: 'Skill instructions content',
+    };
+    const promptTurn = async (skills: (typeof demoSkill)[]) => {
+      const control = await session.doPromptTurn({
+        skills,
+        prompt: 'test prompt',
+        tools: [],
+        emit: vi.fn(),
+      });
+      await control.done;
+    };
+
+    try {
+      await promptTurn([demoSkill]);
+      // No live session existed yet: the first build itself carried the skills.
+      expect(setActiveToolsByName).not.toHaveBeenCalled();
+
+      await promptTurn([demoSkill]);
+      // Same skills, same manifest: nothing to refresh.
+      expect(setActiveToolsByName).not.toHaveBeenCalled();
+
+      await promptTurn([
+        demoSkill,
+        { ...demoSkill, name: 'other-skill', description: 'Other skill' },
+      ]);
+      // The live session's prompt is rebuilt from the reloaded loader, as
+      // applySessionInstructions does for instruction changes.
+      expect(setActiveToolsByName).toHaveBeenCalledExactlyOnceWith(['read']);
+      expect(piMock.createAgentSession).toHaveBeenCalledOnce();
     } finally {
       await session.doDestroy();
     }

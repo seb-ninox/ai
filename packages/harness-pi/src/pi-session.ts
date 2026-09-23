@@ -185,6 +185,28 @@ function createHarnessPiSkills({
   });
 }
 
+/**
+ * Whether two harness skill lists render the same `<available_skills>` section, which is
+ * all the resource loader contributes to the system prompt from them.
+ */
+function sameHarnessSkills(
+  previous: ReadonlyArray<Skill>,
+  next: ReadonlyArray<Skill>,
+): boolean {
+  return (
+    previous.length === next.length &&
+    previous.every((skill, index) => {
+      const other = next[index];
+      return (
+        other != null &&
+        skill.name === other.name &&
+        skill.description === other.description &&
+        skill.filePath === other.filePath
+      );
+    })
+  );
+}
+
 const PI_NATIVE_BUILTIN_NAMES = [
   'read',
   'write',
@@ -1457,12 +1479,27 @@ export async function createPiSession(
       invalidSkillFilePathMessage: ({ skillName, filePath }) =>
         `Invalid Pi skill file path for ${skillName}: ${filePath}`,
     });
+    const previousHarnessSkills = harnessSkills;
     harnessSkills = createHarnessPiSkills({
       skills: turnOpts.skills,
       sandboxSkillRootDir,
     });
-    if (piSession != null && skillWriteResult.changed) {
+    /*
+     * The resource loader only sees `harnessSkills` when it reloads, and Pi copies the
+     * loader's skill list into the system prompt when an AgentSession is built (after
+     * that only an explicit tool-set change rebuilds it). The loader was last reloaded at
+     * session start, before any turn had set `harnessSkills`, so without a reload here the
+     * first AgentSession is built from an empty skill list and the model never receives
+     * the `<available_skills>` section — its only pointer to where the SKILL.md files
+     * live. Reload whenever the skill set the loader would report differs from what it
+     * last saw, and refresh a live session's prompt the way applySessionInstructions does.
+     */
+    if (
+      skillWriteResult.changed ||
+      !sameHarnessSkills(previousHarnessSkills, harnessSkills)
+    ) {
       await reloadResourcesOnly();
+      piSession?.setActiveToolsByName(piSession.getActiveToolNames());
     }
 
     const userTools = turnOpts.tools;

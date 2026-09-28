@@ -198,6 +198,73 @@ describe('createTurnLifecycle', () => {
     ]);
   });
 
+  test('hands telemetry a tool error it can name, and host callbacks the raw value', async () => {
+    const telemetryErrors: unknown[] = [];
+    const callbackErrors: unknown[] = [];
+    const errorOf = (event: { toolOutput: unknown }) =>
+      (event.toolOutput as { error?: unknown }).error;
+    const lifecycle = createTurnLifecycle({
+      callId: 'call-1',
+      telemetry: {
+        integrations: [
+          {
+            onToolExecutionEnd: event => {
+              telemetryErrors.push(errorOf(event));
+            },
+          } satisfies Telemetry,
+        ],
+      },
+      callbacks: {
+        onToolExecutionEnd: event => {
+          callbackErrors.push(errorOf(event));
+        },
+      },
+      harnessId: 'mock',
+      modelId: 'mock-model',
+      instructions: undefined,
+      tools: {},
+      toolsContext: {},
+      activeToolNames: [],
+      toolSpecs: [],
+      messages: [{ role: 'user', content: 'go' }],
+      runtimeContext: {},
+      output: undefined,
+    });
+    const toolCall = {
+      type: 'tool-call',
+      toolCallId: 'c1',
+      toolName: 'echo',
+      input: { value: 1 },
+    } as never;
+    const thrown = new Error('host tool threw');
+
+    await lifecycle.start();
+    for (const error of ['Validation failed', { error: 'wrapped' }, thrown]) {
+      await lifecycle.toolExecutionEnd({
+        toolCall,
+        toolOutput: {
+          ...(toolCall as object),
+          type: 'tool-error',
+          error,
+        } as never,
+        toolExecutionMs: 0,
+      });
+    }
+
+    expect(callbackErrors).toEqual([
+      'Validation failed',
+      { error: 'wrapped' },
+      thrown,
+    ]);
+    expect(telemetryErrors.map(error => (error as Error).message)).toEqual([
+      'Validation failed',
+      'wrapped',
+      'host tool threw',
+    ]);
+    expect(telemetryErrors[0]).toMatchObject({ result: 'Validation failed' });
+    expect(telemetryErrors[2]).toBe(thrown);
+  });
+
   test('settles a paused tool call as pending rather than as an error', async () => {
     const outputs: unknown[] = [];
     const startedToolCallIds: string[] = [];

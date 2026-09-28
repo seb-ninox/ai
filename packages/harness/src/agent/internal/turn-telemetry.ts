@@ -89,6 +89,50 @@ export interface TurnLifecycle<
   error(error: unknown): Promise<void>;
 }
 
+/**
+ * A tool error carrying a result value rather than an `Error`, so telemetry can say what failed.
+ * The raw value stays on `result`.
+ */
+class HarnessToolResultError extends Error {
+  readonly result: unknown;
+
+  constructor(message: string, result: unknown) {
+    super(message);
+    this.name = 'HarnessToolResultError';
+    this.result = result;
+  }
+}
+
+function describeToolErrorValue(value: unknown): string {
+  if (typeof value === 'string') return value;
+  const error = (value as { error?: unknown } | null)?.error;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * The copy of a tool error handed to telemetry.
+ *
+ * `@ai-sdk/otel` writes a span's status message only for an `Error`; any other value becomes a
+ * bare ERROR. A runtime that refuses a call itself, as Pi does when the arguments fail the
+ * published schema before any host code runs, reports that refusal only as a failed result whose
+ * value is its own text. So the span of every such call said it failed and never why. Host
+ * callbacks and step results keep the runtime's raw value; only telemetry gets the wrapped one.
+ */
+function recordableToolOutput<PART extends { type: string }>(part: PART): PART {
+  if (part.type !== 'tool-error') return part;
+  const { error } = part as PART & { error: unknown };
+  if (error instanceof Error) return part;
+  return {
+    ...part,
+    error: new HarnessToolResultError(describeToolErrorValue(error), error),
+  };
+}
+
 async function notify<EVENT>(
   event: EVENT,
   ...callbacks: Array<((event: EVENT) => unknown) | undefined>
@@ -250,11 +294,13 @@ export function createTurnLifecycle<
       toolOutput: input.toolOutput,
       toolExecutionMs: input.toolExecutionMs,
     } as ToolExecutionEndEvent<TOOLS>;
-    await notify(
-      event,
-      options.callbacks.onToolExecutionEnd,
-      telemetry.onToolExecutionEnd as typeof options.callbacks.onToolExecutionEnd,
-    );
+    await Promise.all([
+      notify(event, options.callbacks.onToolExecutionEnd),
+      notify(
+        { ...event, toolOutput: recordableToolOutput(input.toolOutput) },
+        telemetry.onToolExecutionEnd as typeof options.callbacks.onToolExecutionEnd,
+      ),
+    ]);
   };
 
   return {
@@ -317,11 +363,14 @@ export function createTurnLifecycle<
           timeBetweenOutputChunksMs: undefined,
         },
       };
-      await notify(
-        event,
-        options.callbacks.onLanguageModelCallEnd,
-        telemetry.onLanguageModelCallEnd as typeof options.callbacks.onLanguageModelCallEnd,
-      );
+      await Promise.all([
+        notify(event, options.callbacks.onLanguageModelCallEnd),
+        // The provider-executed tool spans are built from this content.
+        notify(
+          { ...event, content: input.content.map(recordableToolOutput) },
+          telemetry.onLanguageModelCallEnd as typeof options.callbacks.onLanguageModelCallEnd,
+        ),
+      ]);
     },
 
     async stepEnd(step) {

@@ -24,6 +24,8 @@ import { HarnessAgent } from './harness-agent';
  * `@opentelemetry/api` is not a dependency of this package.
  */
 const SPAN_STATUS_UNSET = 0;
+/** `SpanStatusCode.ERROR`, inlined for the same reason. */
+const SPAN_STATUS_ERROR = 2;
 
 const usage = {
   inputTokens: {
@@ -780,6 +782,82 @@ describe('HarnessAgent telemetry integration', () => {
       JSON.stringify({ status: 'awaiting-host-input' }),
     );
   });
+
+  /*
+   * Pi refuses a call whose arguments fail the published schema before any host
+   * code runs, and reports it only as a failed result carrying its own text. A
+   * refused host tool arrives exactly like a builtin: provider-executed, with
+   * both of its spans typed `extension`. Those spans used to end as a bare ERROR
+   * with no message.
+   */
+  test.each([
+    ['a runtime builtin', 'bash'],
+    ['a registered host tool', 'echo'],
+  ] as const)(
+    'names why the runtime refused %s on its tool spans',
+    async (_label, toolName) => {
+      const providerExecuted = true;
+      const refusal = `Validation failed for tool "${toolName}": - value: must be string`;
+      const harness = scriptedHarness([
+        { type: 'stream-start', modelId: 'otel-model' },
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName,
+          input: '{"value":1}',
+          providerExecuted,
+        },
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName,
+          result: refusal,
+          isError: true,
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'stop' },
+          totalUsage: usage,
+        },
+      ]);
+      const { exporter, tracer } = createSdkTracer();
+      const echo = tool({
+        description: 'Echo a value.',
+        inputSchema: z.object({ value: z.string() }),
+      });
+      const agent = new HarnessAgent({
+        harness,
+        tools: { echo },
+        sandbox: makeSandboxProvider(),
+        telemetry: {
+          isEnabled: true,
+          recordInputs: true,
+          recordOutputs: true,
+          integrations: [new OpenTelemetry({ tracer })],
+        },
+      });
+
+      const session = await agent.createSession();
+      await agent.generate({ session, prompt: 'go' });
+      await session.destroy();
+
+      const toolSpans = exporter
+        .getFinishedSpans()
+        .filter(span => span.name === `execute_tool ${toolName}`);
+      expect(toolSpans.length).toBeGreaterThan(0);
+      for (const toolSpan of toolSpans) {
+        expect(toolSpan.status).toEqual({
+          code: SPAN_STATUS_ERROR,
+          message: refusal,
+        });
+      }
+    },
+  );
 
   test('fires no telemetry when settings.telemetry is unset', async () => {
     const harness = scriptedHarness([

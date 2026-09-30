@@ -18,6 +18,7 @@ minimumReleaseAge: 4320 # 3 days
 minimumReleaseAgeExclude:
   # First-party packages may be consumed immediately as part of their release flow.
   - '@ai-sdk/*'
+  - '@earendil-works/*'
   - '@vercel/*'
   - 'ai'
 

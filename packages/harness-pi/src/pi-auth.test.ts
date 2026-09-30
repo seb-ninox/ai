@@ -10,6 +10,7 @@ import {
   resolvePiEnv,
   type PiAuthenticationMode,
 } from './pi-auth';
+import { createPiModelResolver } from './pi-model-resolver';
 
 const authPaths: string[] = [];
 
@@ -727,4 +728,29 @@ describe('registerPiProviders', () => {
 
     expect(providers).toEqual(['mistral', 'openai', 'vercel-ai-gateway']);
   });
+});
+
+describe('anthropic model catalog', () => {
+  // An id missing from Pi's catalog does not fail: Pi silently runs its own
+  // provider default instead. Hosts pick these ids, so pin that they resolve.
+  it.each(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-sonnet-5'])(
+    'resolves %s to itself',
+    async id => {
+      const options = {
+        ANTHROPIC_API_KEY: 'ant',
+      } satisfies PiAuthenticationMode;
+      const resolvedEnv = resolvePiEnv({ options, env: {} });
+      const registries = await registerProviders({ options, resolvedEnv });
+      const resolveModel = createPiModelResolver({
+        modelRegistry: registries.modelRegistry,
+        env: resolvedEnv,
+      });
+
+      expect(resolveModel(id)).toMatchObject({
+        id,
+        provider: 'anthropic',
+        api: 'anthropic-messages',
+      });
+    },
+  );
 });

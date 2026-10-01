@@ -42,35 +42,6 @@ const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
 const HARNESS_CLIENT_APP = `ai-sdk/harness-pi/${VERSION}`;
 
-/**
- * The beta that makes Anthropic honour `cache_control.ttl: "1h"`.
- *
- * pi-ai already ASKS for the long TTL — under `PI_CACHE_RETENTION=long` it emits
- * `cache_control: { type: 'ephemeral', ttl: '1h' }` — but it never sends this header, and
- * without it the API ignores the `ttl` field and applies the default five minutes. The
- * symptom is a prompt prefix that caches within a conversation and misses between them,
- * which reads like a cache-key bug rather than an expiry.
- *
- * Sent as a provider header rather than added to pi-ai's own `betaFeatures`, which is where
- * it belongs but is not ours to change. pi-ai merges provider headers AFTER its computed
- * `anthropic-beta` with a last-wins `Object.assign`, so this REPLACES that value rather than
- * appending to it. Gated on the retention flag for exactly that reason: only a caller that
- * asked for a one-hour TTL can lose a beta pi-ai would have added on its own.
- */
-const EXTENDED_CACHE_TTL_BETA = 'extended-cache-ttl-2025-04-11';
-
-/**
- * Whether a one-hour prompt cache TTL was asked for, resolved the way pi-ai resolves it:
- * an explicitly supplied env first, then the process env.
- */
-function wantsLongCacheRetention(
-  customEnv: Record<string, string | undefined>,
-): boolean {
-  return (
-    (customEnv.PI_CACHE_RETENTION ?? process.env.PI_CACHE_RETENTION) === 'long'
-  );
-}
-
 function createIsolatedPiCredentialStore(): {
   credentials: PiCredentialStore;
   finishInitialization(): void;
@@ -464,11 +435,6 @@ function pickAnthropicEnv(
     result.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL;
   if (env.ANTHROPIC_AUTH_TOKEN)
     result.ANTHROPIC_AUTH_TOKEN = env.ANTHROPIC_AUTH_TOKEN;
-  // Not a credential, but it decides whether the long-cache-TTL beta rides along — see
-  // EXTENDED_CACHE_TTL_BETA. Carried here so a caller-supplied env can set it explicitly
-  // instead of only through the process env.
-  if (env.PI_CACHE_RETENTION)
-    result.PI_CACHE_RETENTION = env.PI_CACHE_RETENTION;
   return result;
 }
 
@@ -545,13 +511,18 @@ async function registerCustomProviders({
 
   if (customEnv.ANTHROPIC_API_KEY) {
     const baseUrl = customEnv.ANTHROPIC_BASE_URL ?? DEFAULT_ANTHROPIC_BASE_URL;
+    /*
+     * Never sets `anthropic-beta`. pi-ai treats a configured value as the
+     * COMPLETE beta list and drops the ones it computes per model, such as
+     * `mid-conversation-output-config` (without it Claude 5.5 requests fail
+     * with "messages.N.output_config: Extra inputs are not permitted"). The
+     * one-hour cache TTL needs no beta: pi-ai sends `ttl: "1h"` itself under
+     * PI_CACHE_RETENTION=long.
+     */
     const anthropicHeaders: Record<string, string> = {
       ...headers,
       ...(customEnv.ANTHROPIC_AUTH_TOKEN
         ? { authorization: `Bearer ${customEnv.ANTHROPIC_AUTH_TOKEN}` }
-        : {}),
-      ...(wantsLongCacheRetention(customEnv)
-        ? { 'anthropic-beta': EXTENDED_CACHE_TTL_BETA }
         : {}),
     };
     await register({

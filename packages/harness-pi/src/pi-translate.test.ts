@@ -542,7 +542,7 @@ describe('translatePiEvent', () => {
   });
 
   it('attaches message usage to a host tool call for an approval pause', () => {
-    const state = createPiTranslatorState();
+    const state = createPiTranslatorState({ hostToolNames: ['weather'] });
     emit(
       [
         { type: 'turn_start' } as PiSessionEvent,
@@ -690,7 +690,10 @@ describe('translatePiEvent', () => {
   });
 
   it('emits tool-call with providerExecuted unset for user-registered tools', () => {
-    const state = createPiTranslatorState({ builtinToolNames: ['bash'] });
+    const state = createPiTranslatorState({
+      builtinToolNames: ['bash'],
+      hostToolNames: ['deploy'],
+    });
     emit([{ type: 'turn_start' } as PiSessionEvent], state);
     const out = translatePiEvent(
       {
@@ -758,6 +761,71 @@ describe('translatePiEvent', () => {
         },
       ]
     `);
+  });
+
+  it('marks a Pi extension tool call as provider-executed and dynamic, unlike a host tool', () => {
+    const state = createPiTranslatorState({
+      builtinToolNames: ['read'],
+      hostToolNames: ['query_table'],
+    });
+    emit([{ type: 'turn_start' } as PiSessionEvent], state);
+
+    const scriptCall = translatePiEvent(
+      {
+        type: 'tool_execution_start',
+        toolCallId: 'script-1',
+        toolName: 'codemode',
+        args: { code: 'return 1' },
+      } as PiSessionEvent,
+      state,
+    );
+    const hostCall = translatePiEvent(
+      {
+        type: 'tool_execution_start',
+        toolCallId: 'host-1',
+        toolName: 'query_table',
+        args: { table: 'members' },
+      } as PiSessionEvent,
+      state,
+    );
+    const scriptResult = translatePiEvent(
+      {
+        type: 'tool_execution_end',
+        toolCallId: 'script-1',
+        isError: true,
+        result: {
+          content: [
+            { type: 'text', text: 'Script failed\nScript error:\nboom' },
+          ],
+        },
+      } as PiSessionEvent,
+      state,
+    );
+
+    expect([scriptCall[0], hostCall[0], scriptResult[0]]).toEqual([
+      {
+        type: 'tool-call',
+        toolCallId: 'script-1',
+        toolName: 'codemode',
+        input: '{"code":"return 1"}',
+        providerExecuted: true,
+        dynamic: true,
+      },
+      {
+        type: 'tool-call',
+        toolCallId: 'host-1',
+        toolName: 'query_table',
+        input: '{"table":"members"}',
+      },
+      {
+        type: 'tool-result',
+        toolCallId: 'script-1',
+        toolName: 'codemode',
+        result: 'Script failed\nScript error:\nboom',
+        isError: true,
+        dynamic: true,
+      },
+    ]);
   });
 
   it('keeps non-JSON MCP results and JSON native results as text', () => {

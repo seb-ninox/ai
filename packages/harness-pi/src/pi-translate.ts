@@ -231,22 +231,25 @@ export function piTurnFinishReason(
 }
 
 /**
- * How a tool call is dispatched, from the native tool name. Pi runs its
- * builtin tools and MCP tools itself; everything else is handed back to the
- * harness host. `tool-input-start` reports the same flags as the `tool-call`
- * that follows it so a consumer does not have to wait for the call to know
- * who will execute it.
+ * How a tool call is dispatched, from the native tool name. A tool the host
+ * registered is handed back to the host; every other tool is one Pi executes
+ * itself: its builtins, MCP tools, and extension tools such as `codemode`.
+ *
+ * Of those, everything but a declared builtin is also `dynamic`: the host has
+ * no tool definition for the name, and the AI SDK only accepts a
+ * provider-executed call it cannot look up when the part says so (otherwise
+ * `parseToolCall` settles it as an invalid call). `tool-input-start` reports
+ * the same flags as the `tool-call` that follows it so a consumer does not
+ * have to wait for the call to know who will execute it.
  */
 function resolveToolDispatch(
   state: PiTranslatorState,
   nativeName: string,
-): { isMcpTool: boolean; providerExecuted: boolean } {
-  const isMcpTool =
-    !state.hostToolNames.has(nativeName) &&
-    (nativeName === 'mcp' || nativeName.startsWith('mcp__'));
+): { dynamic: boolean; providerExecuted: boolean } {
+  const providerExecuted = !state.hostToolNames.has(nativeName);
   return {
-    isMcpTool,
-    providerExecuted: state.builtinToolNames.has(nativeName) || isMcpTool,
+    dynamic: providerExecuted && !state.builtinToolNames.has(nativeName),
+    providerExecuted,
   };
 }
 
@@ -485,7 +488,7 @@ export function translatePiEvent(
         const call = readStreamingToolCall(event);
         if (!call) return [];
         const { wire, native } = resolveToolName(state, call.name);
-        const { isMcpTool, providerExecuted } = resolveToolDispatch(
+        const { dynamic, providerExecuted } = resolveToolDispatch(
           state,
           native,
         );
@@ -496,7 +499,7 @@ export function translatePiEvent(
             id: call.id,
             toolName: wire,
             ...(providerExecuted ? { providerExecuted: true } : {}),
-            ...(isMcpTool ? { dynamic: true } : {}),
+            ...(dynamic ? { dynamic: true } : {}),
           },
         ];
       }
@@ -588,11 +591,8 @@ export function translatePiEvent(
       if (!event.toolCallId || !event.toolName) return [];
       const { wire, native } = resolveToolName(state, event.toolName);
       state.observedToolNames.set(event.toolCallId, wire);
-      const { isMcpTool, providerExecuted } = resolveToolDispatch(
-        state,
-        native,
-      );
-      if (isMcpTool) state.dynamicToolCallIds.add(event.toolCallId);
+      const { dynamic, providerExecuted } = resolveToolDispatch(state, native);
+      if (dynamic) state.dynamicToolCallIds.add(event.toolCallId);
       const input = serializeToolOutput(event.args ?? event.input ?? {});
       return [
         {
@@ -605,7 +605,7 @@ export function translatePiEvent(
           ...(!providerExecuted && state.pendingStepUsage
             ? { usage: state.pendingStepUsage }
             : {}),
-          ...(isMcpTool ? { dynamic: true } : {}),
+          ...(dynamic ? { dynamic: true } : {}),
           ...(state.stepToolCallCount != null
             ? { stepToolCallCount: state.stepToolCallCount }
             : {}),

@@ -1,5 +1,6 @@
 import {
   createAgentSession,
+  createCodemodeExtension,
   DefaultResourceLoader,
   defineTool,
   ModelRegistry,
@@ -11,6 +12,7 @@ import {
   type PromptOptions,
   type Skill,
   type ToolDefinition,
+  type ToolExposure,
 } from '@earendil-works/pi-coding-agent';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -272,6 +274,25 @@ export type PiThinkingLevel =
   | 'xhigh'
   | 'max';
 
+/**
+ * Pi's `codemode` tool, which lets the model write one JavaScript script that
+ * calls other tools instead of issuing the calls one step at a time. Pi
+ * registers the tool inactive; the session activates it on every build.
+ */
+export interface PiCodemodeSettings {
+  /**
+   * `on` (Pi's default) keeps every script-callable tool declared to the model
+   * and appends its codemode declaration to the tool description. `only` hides
+   * those declarations and lists the tools in the codemode description instead.
+   */
+  readonly mode?: 'on' | 'only';
+  /**
+   * Estimated tokens the codemode description may spend on tool declarations.
+   * Pi's default is 3000.
+   */
+  readonly inlineBudget?: number;
+}
+
 export interface PiSessionSettings {
   readonly auth?: PiAuthenticationMode;
   readonly headers?: Readonly<Record<string, string>>;
@@ -279,7 +300,17 @@ export interface PiSessionSettings {
   readonly mcpServers?: Record<string, unknown>;
   readonly extensionFactories?: ReadonlyArray<ExtensionFactory>;
   readonly sequentialToolCalls?: boolean;
+  readonly codemode?: PiCodemodeSettings;
+  /**
+   * How the model reaches each host tool, by name; unlisted tools keep Pi's
+   * default (`direct`). `model-only` keeps a tool declared while refusing it to
+   * codemode scripts.
+   */
+  readonly toolExposure?: Readonly<Record<string, ToolExposure>>;
 }
+
+/** The name Pi registers its codemode tool under; the package does not export it. */
+const PI_CODEMODE_TOOL_NAME = 'codemode';
 
 export interface CreatePiSessionInput {
   readonly sessionId: string;
@@ -597,9 +628,23 @@ export async function createPiSession(
    * by the resource loader below and both are subject to the reload handling
    * that keeps the active runtime alive across resource-only reloads.
    */
+  const codemode = input.settings.codemode;
   const extensionFactories: ExtensionFactory[] = [
     ...(input.settings.sequentialToolCalls
       ? [sequentialToolCallsExtension]
+      : []),
+    // `models: false`: scripts get no model catalog or classifier access; what
+    // a script may reach is decided by `toolExposure` alone.
+    ...(codemode
+      ? [
+          createCodemodeExtension({
+            ...(codemode.mode ? { mode: codemode.mode } : {}),
+            ...(codemode.inlineBudget !== undefined
+              ? { inlineBudget: codemode.inlineBudget }
+              : {}),
+            models: false,
+          }),
+        ]
       : []),
     ...(input.settings.extensionFactories ?? []),
   ];
@@ -1320,6 +1365,7 @@ export async function createPiSession(
               currentEmit?.(part);
             }
           },
+          input.settings.toolExposure?.[spec.name],
         ),
       ),
     ];
@@ -1390,6 +1436,17 @@ export async function createPiSession(
       ...(activeResolvedModel ? { model: activeResolvedModel } : {}),
     });
     piSession = session;
+    if (codemode) {
+      /*
+       * Pi registers `codemode` inactive, and the `noTools: 'builtin'` build
+       * above leaves the `defaultTools` setting unread, so activating it by
+       * name is the only path. This runs on every build, fresh and resumed.
+       */
+      piSession.setActiveToolsByName([
+        ...piSession.getActiveToolNames(),
+        PI_CODEMODE_TOOL_NAME,
+      ]);
+    }
     if (hasMcpServers) {
       await piSession.bindExtensions({ mode: 'print' });
     }
@@ -2078,6 +2135,29 @@ function asPiToolResult(text: string): AgentToolResult<unknown> {
   };
 }
 
+/**
+ * Declared on every host tool so a codemode script receives the host's object.
+ * Pi hands a script the `structuredContent` of a tool that declares an output
+ * schema and the text content otherwise, which left scripts holding JSON text
+ * they had to parse. The model is unaffected: it still reads `content`, and
+ * providers send no output schema.
+ */
+const HOST_TOOL_OUTPUT_SCHEMA = Type.Object({}, { additionalProperties: true });
+
+/**
+ * The model-facing text plus, for an object output, the same value as
+ * `structuredContent`. Any other output reaches a script as text, as before.
+ */
+function asHostToolResult(output: unknown): AgentToolResult<unknown> {
+  const text = serializeToolOutput(output);
+  const result = asPiToolResult(text);
+  if (typeof output !== 'object' || output === null || Array.isArray(output)) {
+    return result;
+  }
+  // Parsed back from the text so the script holds exactly the JSON the model sees.
+  return { ...result, structuredContent: JSON.parse(text) };
+}
+
 async function maybeDenyPiBuiltinTool(input: {
   toolCallId: string;
   nativeName: (typeof PI_NATIVE_BUILTIN_NAMES)[number];
@@ -2295,6 +2375,7 @@ function buildUserToolDefinition(
   pending: Map<string, PendingToolResult>,
   early: Map<string, unknown>,
   dispatch: (toolCallId: string, args: unknown) => void,
+  exposure: ToolExposure | undefined,
 ): ToolDefinition {
   const schema = spec.inputSchema ?? {
     type: 'object',
@@ -2306,6 +2387,8 @@ function buildUserToolDefinition(
     label: spec.name,
     description: spec.description ?? `User-registered tool ${spec.name}`,
     parameters: toolSpecToTypeBoxParameters(schema),
+    outputSchema: HOST_TOOL_OUTPUT_SCHEMA,
+    ...(exposure ? { exposure } : {}),
     async execute(toolCallId, args) {
       dispatch(toolCallId, args);
       /*
@@ -2318,11 +2401,11 @@ function buildUserToolDefinition(
       if (early.has(toolCallId)) {
         const output = early.get(toolCallId);
         early.delete(toolCallId);
-        return asPiToolResult(serializeToolOutput(output));
+        return asHostToolResult(output);
       }
       return new Promise<unknown>(resolve => {
         pending.set(toolCallId, { resolve });
-      }).then(output => asPiToolResult(serializeToolOutput(output)));
+      }).then(asHostToolResult);
     },
   });
 }

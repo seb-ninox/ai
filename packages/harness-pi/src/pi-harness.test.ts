@@ -89,6 +89,24 @@ describe('createPi adapter', () => {
     });
   });
 
+  it('forwards codemode and toolExposure to the session, and omits them when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({
+      codemode: { mode: 'on', inlineBudget: 1200 },
+      toolExposure: { modify_schema: 'model-only' },
+    }).doStart(startOptions());
+    await createPi().doStart(startOptions());
+
+    const [withCodemode, withoutCodemode] = vi
+      .mocked(createPiSession)
+      .mock.calls.map(([input]) => input.settings);
+    expect(withCodemode).toEqual({
+      codemode: { mode: 'on', inlineBudget: 1200 },
+      toolExposure: { modify_schema: 'model-only' },
+    });
+    expect(withoutCodemode).toEqual({});
+  });
+
   it('omits sequentialToolCalls when unset', async () => {
     vi.mocked(createPiSession).mockClear();
     await createPi().doStart(startOptions());

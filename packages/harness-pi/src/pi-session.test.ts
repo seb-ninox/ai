@@ -34,7 +34,7 @@ import { createPi } from './pi-harness';
 import { sequentialToolCallsExtension } from './pi-sequential-tools';
 import { createPiSession } from './pi-session';
 
-type FakePiTool = Pick<ToolDefinition, 'name' | 'execute'>;
+type FakePiTool = Pick<ToolDefinition, 'name' | 'execute' | 'exposure'>;
 type FakeExtensionsResult = {
   readonly errors: unknown[];
   readonly extensions: unknown[];
@@ -70,7 +70,12 @@ const piMock = vi.hoisted(() => {
   return {
     agentSessionExtensionResults: [] as FakeExtensionsResult[],
     /** The loader's skill list as each createAgentSession call saw it. */
-    agentSessionSkills: [] as Array<Array<Pick<FakeSkill, 'name' | 'filePath'>>>,
+    agentSessionSkills: [] as Array<
+      Array<Pick<FakeSkill, 'name' | 'filePath'>>
+    >,
+    codemodeFactory: vi.fn(),
+    /** What each `createCodemodeExtension` call received. */
+    codemodeOptions: [] as unknown[],
     createAgentSession: vi.fn(),
     customTools: [] as FakePiTool[],
     appendSystemPrompts: [] as string[][],
@@ -108,6 +113,10 @@ vi.mock('pi-mcp-adapter', () => ({
 vi.mock('@earendil-works/pi-coding-agent', () => {
   return {
     createAgentSession: piMock.createAgentSession,
+    createCodemodeExtension: vi.fn((options: unknown) => {
+      piMock.codemodeOptions.push(options);
+      return piMock.codemodeFactory;
+    }),
     DefaultResourceLoader: class {
       private extensionsResult: FakeExtensionsResult = {
         errors: [],
@@ -136,8 +145,9 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
         const base = { errors: [], extensions: [], runtime: {} };
         this.extensionsResult = this.options.extensionsOverride?.(base) ?? base;
         const skillsBase: FakeSkillsResult = { skills: [], diagnostics: [] };
-        this.skills = (this.options.skillsOverride?.(skillsBase) ?? skillsBase)
-          .skills;
+        this.skills = (
+          this.options.skillsOverride?.(skillsBase) ?? skillsBase
+        ).skills;
       }
 
       getExtensions() {
@@ -175,6 +185,8 @@ describe('createPiSession', () => {
   beforeEach(() => {
     piMock.agentSessionExtensionResults = [];
     piMock.agentSessionSkills = [];
+    piMock.codemodeFactory.mockClear();
+    piMock.codemodeOptions = [];
     piMock.customTools = [];
     piMock.appendSystemPrompts = [];
     piMock.extensionFactoryInputs = [];
@@ -569,6 +581,101 @@ describe('createPiSession', () => {
     }
   });
 
+  it('loads and activates the codemode tool on a build only when codemode is set', async () => {
+    const promptTurn = async (settings: { codemode?: { mode: 'only' } }) => {
+      const setActiveToolsByName = vi.fn();
+      piMock.session = Object.assign(createFakePiSession().session, {
+        getActiveToolNames: vi.fn(() => ['read', 'weather']),
+        setActiveToolsByName,
+      });
+      const session = await createPiSession({
+        sessionId: 'session-codemode',
+        sandboxSession: createSandboxSession(),
+        sessionWorkDir: '/sandbox/work',
+        settings,
+        clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+        isResume: false,
+      });
+      try {
+        const control = await session.doPromptTurn({
+          skills: [],
+          prompt: 'go',
+          tools: [{ name: 'weather' }] satisfies HarnessV1ToolSpec[],
+          emit: vi.fn(),
+        });
+        await control.done;
+      } finally {
+        await session.doDestroy();
+      }
+      return setActiveToolsByName;
+    };
+
+    const withCodemode = await promptTurn({ codemode: { mode: 'only' } });
+    expect(piMock.codemodeOptions).toEqual([{ mode: 'only', models: false }]);
+    expect(piMock.extensionFactoryInputs[0]?.snapshot).toContain(
+      piMock.codemodeFactory,
+    );
+    // Pi registers the tool inactive, and this build shape never reads the
+    // `defaultTools` setting, so the session has to activate it by name.
+    expect(piMock.createAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ noTools: 'builtin' }),
+    );
+    expect(withCodemode).toHaveBeenCalledExactlyOnceWith([
+      'read',
+      'weather',
+      'codemode',
+    ]);
+
+    piMock.codemodeOptions = [];
+    piMock.extensionFactoryInputs = [];
+    const withoutCodemode = await promptTurn({});
+    expect(piMock.codemodeOptions).toEqual([]);
+    expect(piMock.extensionFactoryInputs[0]?.snapshot).toEqual([]);
+    expect(withoutCodemode).not.toHaveBeenCalled();
+  });
+
+  it('stamps the configured exposure on host tool definitions and leaves the rest at Pi’s default', async () => {
+    piMock.session = Object.assign(createFakePiSession().session, {
+      getActiveToolNames: vi.fn(() => []),
+      setActiveToolsByName: vi.fn(),
+    });
+    const session = await createPiSession({
+      sessionId: 'session-tool-exposure',
+      sandboxSession: createSandboxSession(),
+      sessionWorkDir: '/sandbox/work',
+      settings: {
+        codemode: {},
+        toolExposure: { deploy: 'model-only', unused: 'hidden' },
+      },
+      clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+      isResume: false,
+    });
+
+    try {
+      const control = await session.doPromptTurn({
+        skills: [],
+        prompt: 'go',
+        tools: [{ name: 'weather' }, { name: 'deploy' }],
+        emit: vi.fn(),
+      });
+      await control.done;
+
+      // Pi's builtins are registered through the same list; only the host tools matter here.
+      const hostTools = piMock.customTools.filter(({ name }) =>
+        ['weather', 'deploy'].includes(name),
+      );
+      expect(
+        hostTools.map(({ name, exposure }) => ({ name, exposure })),
+      ).toEqual([
+        { name: 'weather', exposure: undefined },
+        { name: 'deploy', exposure: 'model-only' },
+      ]);
+      expect(hostTools[0]).not.toHaveProperty('exposure');
+    } finally {
+      await session.doDestroy();
+    }
+  });
+
   it('steers the active Pi session', async () => {
     let finishPrompt!: () => void;
     const promptDone = new Promise<void>(resolve => {
@@ -957,6 +1064,7 @@ describe('createPiSession', () => {
       {
         content: [{ type: 'text', text: '{"weather":"sunny"}' }],
         details: undefined,
+        structuredContent: { weather: 'sunny' },
       },
       `
       {
@@ -967,6 +1075,9 @@ describe('createPiSession', () => {
           },
         ],
         "details": undefined,
+        "structuredContent": {
+          "weather": "sunny",
+        },
       }
     `,
     );
@@ -1540,6 +1651,7 @@ describe('createPiSession', () => {
     expect(resolvedToolResult).toEqual({
       content: [{ type: 'text', text: '{"weather":"sunny"}' }],
       details: undefined,
+      structuredContent: { weather: 'sunny' },
     });
   });
 
@@ -1601,6 +1713,7 @@ describe('createPiSession', () => {
         },
       ],
       details: undefined,
+      structuredContent: { type: 'execution-denied', reason: 'Denied by user' },
     });
   });
 

@@ -4,11 +4,18 @@ import {
   type HarnessV1BuiltinTool,
 } from '@ai-sdk/harness';
 import { tool } from '@ai-sdk/provider-utils';
-import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
+import type {
+  ExtensionFactory,
+  ToolExposure,
+} from '@earendil-works/pi-coding-agent';
 import { z } from 'zod/v4';
 import type { PiAuthenticationMode } from './pi-auth';
 import { piResumeStateSchema } from './pi-resume-state';
-import { createPiSession, type PiThinkingLevel } from './pi-session';
+import {
+  createPiSession,
+  type PiCodemodeSettings,
+  type PiThinkingLevel,
+} from './pi-session';
 import { VERSION } from './version';
 
 /**
@@ -79,6 +86,22 @@ export type PiHarnessSettings = {
    * preceding tool result before choosing another tool.
    */
   readonly sequentialToolCalls?: boolean;
+  /**
+   * Enables Pi's `codemode` tool: the model writes one JavaScript script that
+   * calls other tools as `tools.<name>(...)`, batching what would otherwise be
+   * several model steps. Which host tools a script may reach is decided by
+   * `toolExposure`. The tool is activated on every session build, fresh or
+   * resumed. Absent means no codemode tool.
+   */
+  readonly codemode?: PiCodemodeSettings;
+  /**
+   * How the model reaches each host tool, by name. Unlisted tools keep Pi's
+   * default (`direct`: declared to the model and callable from scripts).
+   * `model-only` keeps a tool declared while refusing it to codemode scripts,
+   * which is how a host keeps its approval-gated tools out of a script's reach.
+   * Pi's own builtins are not affected.
+   */
+  readonly toolExposure?: Readonly<Record<string, ToolExposure>>;
 };
 
 const PI_BUILTIN_TOOLS = {
@@ -186,6 +209,10 @@ export function createPi(
             : {}),
           ...(settings.sequentialToolCalls
             ? { sequentialToolCalls: true }
+            : {}),
+          ...(settings.codemode ? { codemode: settings.codemode } : {}),
+          ...(settings.toolExposure
+            ? { toolExposure: settings.toolExposure }
             : {}),
           ...(startOpts.headers ? { headers: startOpts.headers } : {}),
         },

@@ -10,12 +10,9 @@ import type {
 } from '@earendil-works/pi-coding-agent';
 import { z } from 'zod/v4';
 import type { PiAuthenticationMode } from './pi-auth';
+import type { PiCodemodeSettings } from './pi-codemode';
 import { piResumeStateSchema } from './pi-resume-state';
-import {
-  createPiSession,
-  type PiCodemodeSettings,
-  type PiThinkingLevel,
-} from './pi-session';
+import { createPiSession, type PiThinkingLevel } from './pi-session';
 import { VERSION } from './version';
 
 /**

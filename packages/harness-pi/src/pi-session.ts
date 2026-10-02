@@ -1,6 +1,5 @@
 import {
   createAgentSession,
-  createCodemodeExtension,
   DefaultResourceLoader,
   defineTool,
   ModelRegistry,
@@ -46,6 +45,11 @@ import {
   resolvePiEnv,
   type PiAuthenticationMode,
 } from './pi-auth';
+import {
+  createPiCodemodeExtension,
+  PI_CODEMODE_TOOL_NAME,
+  type PiCodemodeSettings,
+} from './pi-codemode';
 import { sequentialToolCallsExtension } from './pi-sequential-tools';
 import {
   createPiTerminalError,
@@ -274,25 +278,6 @@ export type PiThinkingLevel =
   | 'xhigh'
   | 'max';
 
-/**
- * Pi's `codemode` tool, which lets the model write one JavaScript script that
- * calls other tools instead of issuing the calls one step at a time. Pi
- * registers the tool inactive; the session activates it on every build.
- */
-export interface PiCodemodeSettings {
-  /**
-   * `on` (Pi's default) keeps every script-callable tool declared to the model
-   * and appends its codemode declaration to the tool description. `only` hides
-   * those declarations and lists the tools in the codemode description instead.
-   */
-  readonly mode?: 'on' | 'only';
-  /**
-   * Estimated tokens the codemode description may spend on tool declarations.
-   * Pi's default is 3000.
-   */
-  readonly inlineBudget?: number;
-}
-
 export interface PiSessionSettings {
   readonly auth?: PiAuthenticationMode;
   readonly headers?: Readonly<Record<string, string>>;
@@ -308,9 +293,6 @@ export interface PiSessionSettings {
    */
   readonly toolExposure?: Readonly<Record<string, ToolExposure>>;
 }
-
-/** The name Pi registers its codemode tool under; the package does not export it. */
-const PI_CODEMODE_TOOL_NAME = 'codemode';
 
 export interface CreatePiSessionInput {
   readonly sessionId: string;
@@ -633,19 +615,9 @@ export async function createPiSession(
     ...(input.settings.sequentialToolCalls
       ? [sequentialToolCallsExtension]
       : []),
-    // `models: false`: scripts get no model catalog or classifier access; what
-    // a script may reach is decided by `toolExposure` alone.
-    ...(codemode
-      ? [
-          createCodemodeExtension({
-            ...(codemode.mode ? { mode: codemode.mode } : {}),
-            ...(codemode.inlineBudget !== undefined
-              ? { inlineBudget: codemode.inlineBudget }
-              : {}),
-            models: false,
-          }),
-        ]
-      : []),
+    // Scripts get no model catalog or classifier access; what a script may
+    // reach is decided by `toolExposure` alone.
+    ...(codemode ? [createPiCodemodeExtension(codemode)] : []),
     ...(input.settings.extensionFactories ?? []),
   ];
   if (hasMcpServers) {

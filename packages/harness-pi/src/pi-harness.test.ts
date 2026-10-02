@@ -92,7 +92,12 @@ describe('createPi adapter', () => {
   it('forwards codemode and toolExposure to the session, and omits them when unset', async () => {
     vi.mocked(createPiSession).mockClear();
     await createPi({
-      codemode: { mode: 'on', inlineBudget: 1200 },
+      codemode: {
+        mode: 'on',
+        inlineBudget: 1200,
+        memoryLimitBytes: 33_554_432,
+        timeoutMs: 60_000,
+      },
       toolExposure: { modify_schema: 'model-only' },
     }).doStart(startOptions());
     await createPi().doStart(startOptions());
@@ -101,7 +106,12 @@ describe('createPi adapter', () => {
       .mocked(createPiSession)
       .mock.calls.map(([input]) => input.settings);
     expect(withCodemode).toEqual({
-      codemode: { mode: 'on', inlineBudget: 1200 },
+      codemode: {
+        mode: 'on',
+        inlineBudget: 1200,
+        memoryLimitBytes: 33_554_432,
+        timeoutMs: 60_000,
+      },
       toolExposure: { modify_schema: 'model-only' },
     });
     expect(withoutCodemode).toEqual({});

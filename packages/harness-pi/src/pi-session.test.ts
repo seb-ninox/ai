@@ -3,6 +3,7 @@ import {
   type AgentSession,
   type ExtensionAPI,
   type ExtensionFactory,
+  type ExtensionToolContext,
   type ToolDefinition,
   ModelRuntime,
   SessionManager,
@@ -30,6 +31,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod/v4';
+import type { PiCodemodeSettings } from './pi-codemode';
 import { createPi } from './pi-harness';
 import { sequentialToolCallsExtension } from './pi-sequential-tools';
 import { createPiSession } from './pi-session';
@@ -83,6 +85,7 @@ const piMock = vi.hoisted(() => {
       on: vi.fn((eventType: string, handler: () => unknown) => {
         const handlers = extensionHandlers.get(eventType) ?? [];
         handlers.push(handler);
+      registerTool: vi.fn(),
         extensionHandlers.set(eventType, handlers);
       }),
     } as unknown as ExtensionAPI,
@@ -631,6 +634,86 @@ describe('createPiSession', () => {
     const withoutCodemode = await promptTurn({});
     expect(piMock.codemodeOptions).toEqual([]);
     expect(piMock.extensionFactoryInputs[0]?.snapshot).toEqual([]);
+  it('runs scripts through the limited executor only when the settings carry a script limit', async () => {
+    const piResult = {
+      content: [{ type: 'text' as const, text: 'pi ran it' }],
+      details: undefined,
+    };
+    // Stands in for Pi's factory: registers a codemode tool whose execute is Pi's.
+    piMock.codemodeFactory.mockImplementation((pi: ExtensionAPI) => {
+      pi.registerTool({
+        name: 'codemode',
+        label: 'codemode',
+        description: 'fake codemode',
+        parameters: {
+          type: 'object',
+          properties: { code: { type: 'string' } },
+        },
+        execute: async () => piResult,
+      });
+    });
+    const runRegisteredScript = async (codemode: PiCodemodeSettings) => {
+      piMock.extensionFactoryInputs = [];
+      piMock.session = Object.assign(createFakePiSession().session, {
+        getActiveToolNames: vi.fn(() => []),
+        setActiveToolsByName: vi.fn(),
+      });
+      const session = await createPiSession({
+        sessionId: 'session-codemode-limits',
+        sandboxSession: createSandboxSession(),
+        sessionWorkDir: '/sandbox/work',
+        settings: { codemode },
+        clientApp: 'ai-sdk/harness-pi/0.0.0-test',
+        isResume: false,
+      });
+      try {
+        const control = await session.doPromptTurn({
+          skills: [],
+          prompt: 'go',
+          tools: [],
+          emit: vi.fn(),
+        });
+        await control.done;
+      } finally {
+        await session.doDestroy();
+      }
+      const [factory] = piMock.extensionFactoryInputs[0]?.snapshot ?? [];
+      const registered: ToolDefinition[] = [];
+      await factory?.({
+        registerTool: (tool: ToolDefinition) => {
+          registered.push(tool);
+        },
+      } as unknown as ExtensionAPI);
+      const definition = registered.find(tool => tool.name === 'codemode');
+      if (!definition) throw new Error('no codemode tool was registered');
+      return definition.execute(
+        'call-1',
+        { code: 'return 6 * 7' },
+        undefined,
+        undefined,
+        {
+          tools: [],
+          sessionManager: { getBranch: () => [] },
+        } as unknown as ExtensionToolContext,
+      );
+    };
+
+    try {
+      const limited = await runRegisteredScript({
+        mode: 'on',
+        timeoutMs: 5000,
+      });
+      expect(
+        limited.content.map(block => (block.type === 'text' ? block.text : '')),
+      ).toEqual([expect.stringMatching(/^Script completed\n/), '42']);
+
+      const plain = await runRegisteredScript({ mode: 'on' });
+      expect(plain).toBe(piResult);
+    } finally {
+      piMock.codemodeFactory.mockReset();
+    }
+  });
+
     expect(withoutCodemode).not.toHaveBeenCalled();
   });
 

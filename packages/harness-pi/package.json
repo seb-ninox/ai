@@ -38,8 +38,8 @@
     "@ai-sdk/harness": "workspace:*",
     "@ai-sdk/provider-utils": "workspace:*",
     "@earendil-works/pi-ai": "0.74.2",
-    "@earendil-works/pi-codemode": "^0.99.1",
-    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-codemode": "^1.0.2",
+    "@earendil-works/pi-coding-agent": "^1.0.2",
     "pi-mcp-adapter": "2.12.1",
     "typebox": "^1.1.38"
   },

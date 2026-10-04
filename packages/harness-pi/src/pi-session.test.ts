@@ -101,20 +101,17 @@ const piMock = vi.hoisted(() => {
   };
 });
 
-const mcpAdapterMock = vi.hoisted(() => {
+const mcpExtensionMock = vi.hoisted(() => {
   const mcpExtensionFactory = vi.fn();
   return {
-    createMcpAdapter: vi.fn(() => mcpExtensionFactory),
+    createMcpExtension: vi.fn((_options: unknown) => mcpExtensionFactory),
     mcpExtensionFactory,
   };
 });
 
-vi.mock('pi-mcp-adapter', () => ({
-  createMcpAdapter: mcpAdapterMock.createMcpAdapter,
-}));
-
 vi.mock('@earendil-works/pi-coding-agent', () => {
   return {
+    createMcpExtension: mcpExtensionMock.createMcpExtension,
     createAgentSession: piMock.createAgentSession,
     createCodemodeExtension: vi.fn((options: unknown) => {
       piMock.codemodeOptions.push(options);
@@ -197,8 +194,8 @@ describe('createPiSession', () => {
     piMock.resourceLoaderReloadCount = 0;
     piMock.resourceLoaderOptions = [];
     piMock.session = undefined;
-    mcpAdapterMock.createMcpAdapter.mockClear();
-    mcpAdapterMock.mcpExtensionFactory.mockClear();
+    mcpExtensionMock.createMcpExtension.mockClear();
+    mcpExtensionMock.mcpExtensionFactory.mockClear();
     piMock.createAgentSession.mockReset();
     piMock.createAgentSession.mockImplementation(async options => {
       piMock.agentSessionExtensionResults.push(
@@ -910,20 +907,28 @@ describe('createPiSession', () => {
     await control.done;
     await session.doDestroy();
 
-    expect(mcpAdapterMock.createMcpAdapter).toHaveBeenCalledWith({
-      config: {
-        mcpServers: {
-          memory: { command: 'memory-mcp', args: [] },
-        },
-        settings: {
-          directTools: true,
-          toolPrefix: 'mcp',
-          disableProxyTool: true,
-        },
+    expect(mcpExtensionMock.createMcpExtension).toHaveBeenCalledOnce();
+    const [mcpOptions] = mcpExtensionMock.createMcpExtension.mock.calls[0] as [
+      {
+        loadConfig: () => unknown;
+        openUrl: (url: string) => void;
       },
+    ];
+    expect(mcpOptions.loadConfig()).toEqual({
+      servers: [
+        {
+          name: 'memory',
+          config: { command: 'memory-mcp', args: [] },
+          source: 'harness-pi',
+          scope: 'extension',
+        },
+      ],
+      errors: [],
     });
+    // No browser behind a harness session: a sign-in URL goes nowhere.
+    expect(() => mcpOptions.openUrl('https://example.com/auth')).not.toThrow();
     expect(piMock.resourceLoaderOptions.at(-1)?.extensionFactories).toEqual([
-      mcpAdapterMock.mcpExtensionFactory,
+      mcpExtensionMock.mcpExtensionFactory,
     ]);
     expect(piMock.createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ noTools: 'builtin' }),
@@ -948,10 +953,10 @@ describe('createPiSession', () => {
     try {
       expect(piMock.extensionFactoryInputs.at(-1)?.snapshot).toEqual([
         factory,
-        mcpAdapterMock.mcpExtensionFactory,
+        mcpExtensionMock.mcpExtensionFactory,
       ]);
       expect(factory).toHaveBeenCalledOnce();
-      expect(mcpAdapterMock.mcpExtensionFactory).toHaveBeenCalledOnce();
+      expect(mcpExtensionMock.mcpExtensionFactory).toHaveBeenCalledOnce();
     } finally {
       await session.doDestroy();
     }
@@ -1014,7 +1019,7 @@ describe('createPiSession', () => {
 
     expect(piMock.appendSystemPrompts.at(-1)).toEqual(['Use turbo build.']);
     expect(prompt).toHaveBeenCalledWith('do the thing');
-    expect(mcpAdapterMock.mcpExtensionFactory).toHaveBeenCalledOnce();
+    expect(mcpExtensionMock.mcpExtensionFactory).toHaveBeenCalledOnce();
   });
 
   it('forwards image parts to Pi as prompt attachments', async () => {

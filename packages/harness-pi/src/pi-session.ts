@@ -1,5 +1,6 @@
 import {
   createAgentSession,
+  createMcpExtension,
   DefaultResourceLoader,
   defineTool,
   ModelRegistry,
@@ -8,6 +9,7 @@ import {
   type AgentSession,
   type AgentToolResult,
   type ExtensionFactory,
+  type McpServerConfig,
   type PromptOptions,
   type Skill,
   type ToolDefinition,
@@ -85,26 +87,6 @@ import { PiWorkspaceVfs } from './pi-workspace-vfs';
 import { syncHostWorkspaceFromSandbox } from './pi-workspace-mirror';
 
 const HARNESS_ID = 'pi';
-
-/*
- * pi-mcp-adapter publishes TypeScript source as its package entry point. A
- * non-literal specifier keeps the repository type-check focused on this
- * package's compatibility boundary instead of compiling dependency internals.
- */
-const PI_MCP_ADAPTER_PACKAGE: string = 'pi-mcp-adapter';
-
-type PiMcpAdapterModule = {
-  createMcpAdapter(options: {
-    config: {
-      mcpServers: Record<string, unknown>;
-      settings: {
-        directTools: boolean;
-        toolPrefix: string;
-        disableProxyTool: boolean;
-      };
-    };
-  }): ExtensionFactory;
-};
 
 /*
  * Pi runs in this Node process, not behind an attachable in-sandbox bridge.
@@ -282,7 +264,7 @@ export interface PiSessionSettings {
   readonly auth?: PiAuthenticationMode;
   readonly headers?: Readonly<Record<string, string>>;
   readonly thinkingLevel?: PiThinkingLevel;
-  readonly mcpServers?: Record<string, unknown>;
+  readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
   readonly extensionFactories?: ReadonlyArray<ExtensionFactory>;
   readonly sequentialToolCalls?: boolean;
   readonly codemode?: PiCodemodeSettings;
@@ -621,21 +603,7 @@ export async function createPiSession(
     ...(input.settings.extensionFactories ?? []),
   ];
   if (hasMcpServers) {
-    const { createMcpAdapter } = (await import(
-      PI_MCP_ADAPTER_PACKAGE
-    )) as PiMcpAdapterModule;
-    extensionFactories.push(
-      createMcpAdapter({
-        config: {
-          mcpServers,
-          settings: {
-            directTools: true,
-            toolPrefix: 'mcp',
-            disableProxyTool: true,
-          },
-        },
-      }),
-    );
+    extensionFactories.push(createPiMcpExtension(mcpServers));
   }
   const hasExtensionFactories = extensionFactories.length > 0;
   let preserveExtensionsResult = false;
@@ -2064,8 +2032,8 @@ export async function createPiSession(
 function resolvePiMcpServers({
   mcpServers,
 }: {
-  mcpServers: Record<string, unknown> | undefined;
-}): Record<string, unknown> {
+  mcpServers: Readonly<Record<string, McpServerConfig>> | undefined;
+}): Readonly<Record<string, McpServerConfig>> {
   if (mcpServers == null) return {};
   for (const [name, value] of Object.entries(mcpServers)) {
     if (value == null || typeof value !== 'object' || Array.isArray(value)) {
@@ -2075,6 +2043,30 @@ function resolvePiMcpServers({
     }
   }
   return mcpServers;
+}
+
+/*
+ * Pi's built-in MCP extension, fed the host's servers instead of `mcp.json`:
+ * the harness runs with a private agent directory and no trusted project, so
+ * the file lookup would find nothing, and the servers belong to the host.
+ *
+ * A server that answers 401 makes Pi start an OAuth sign-in and open its URL.
+ * There is no browser behind a harness session, so the URL is dropped and the
+ * server stays unauthenticated; configure credentials through `headers`.
+ */
+function createPiMcpExtension(
+  mcpServers: Readonly<Record<string, McpServerConfig>>,
+): ExtensionFactory {
+  const servers = Object.entries(mcpServers).map(([name, config]) => ({
+    name,
+    config,
+    source: 'harness-pi',
+    scope: 'extension' as const,
+  }));
+  return createMcpExtension({
+    loadConfig: () => ({ servers, errors: [] }),
+    openUrl: () => {},
+  });
 }
 
 /**

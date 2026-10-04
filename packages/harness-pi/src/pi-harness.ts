@@ -6,6 +6,7 @@ import {
 import { tool } from '@ai-sdk/provider-utils';
 import type {
   ExtensionFactory,
+  McpServerConfig,
   ToolExposure,
 } from '@earendil-works/pi-coding-agent';
 import { z } from 'zod/v4';
@@ -68,10 +69,12 @@ export type PiHarnessSettings = {
    */
   readonly systemPrompt?: string;
   /**
-   * MCP server definitions keyed by server name. Each definition uses the
-   * underlying runtime's native MCP server configuration format.
+   * MCP server definitions keyed by server name, in Pi's `mcp.json` server
+   * format. Pi's built-in MCP extension connects them. Tools are named
+   * `mcp__<server>__<tool>` and, unless `exposure` says otherwise, are only
+   * callable from codemode scripts.
    */
-  readonly mcpServers?: Record<string, unknown>;
+  readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
   /**
    * Trusted inline Pi extensions loaded for each harness session.
    *

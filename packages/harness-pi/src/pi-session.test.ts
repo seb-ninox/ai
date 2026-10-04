@@ -85,9 +85,9 @@ const piMock = vi.hoisted(() => {
       on: vi.fn((eventType: string, handler: () => unknown) => {
         const handlers = extensionHandlers.get(eventType) ?? [];
         handlers.push(handler);
-      registerTool: vi.fn(),
         extensionHandlers.set(eventType, handlers);
       }),
+      registerTool: vi.fn(),
     } as unknown as ExtensionAPI,
     extensionFactoryInputs: [] as Array<{
       readonly reference: Array<ExtensionFactory>;
@@ -634,6 +634,9 @@ describe('createPiSession', () => {
     const withoutCodemode = await promptTurn({});
     expect(piMock.codemodeOptions).toEqual([]);
     expect(piMock.extensionFactoryInputs[0]?.snapshot).toEqual([]);
+    expect(withoutCodemode).not.toHaveBeenCalled();
+  });
+
   it('runs scripts through the limited executor only when the settings carry a script limit', async () => {
     const piResult = {
       content: [{ type: 'text' as const, text: 'pi ran it' }],
@@ -712,9 +715,6 @@ describe('createPiSession', () => {
     } finally {
       piMock.codemodeFactory.mockReset();
     }
-  });
-
-    expect(withoutCodemode).not.toHaveBeenCalled();
   });
 
   it('stamps the configured exposure on host tool definitions and leaves the rest at Pi’s default', async () => {

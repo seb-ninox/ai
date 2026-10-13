@@ -133,6 +133,28 @@ function recordableToolOutput<PART extends { type: string }>(part: PART): PART {
   };
 }
 
+/**
+ * The copy of a model call's content handed to telemetry.
+ *
+ * `@ai-sdk/otel` opens an `execute_tool` span for every provider-executed tool call it finds in a
+ * model call's content, because a plain model call reports no execution events for such tools.
+ * The harness does report one for every call, the runtime's own included, so each provider-executed
+ * call got two spans: one under the model call, one under the step. That doubled every Pi builtin,
+ * every Pi argument refusal, and every codemode call. Telemetry gets the calls without the flag, so
+ * the execution events alone produce the span. Host callbacks keep the runtime's raw parts.
+ */
+function recordableModelCallContent<PART extends { type: string }>(
+  content: PART[],
+): PART[] {
+  return content.map(part => {
+    if (part.type !== 'tool-call') return part;
+    const { providerExecuted, ...rest } = part as PART & {
+      providerExecuted?: boolean;
+    };
+    return providerExecuted === true ? (rest as PART) : part;
+  });
+}
+
 async function notify<EVENT>(
   event: EVENT,
   ...callbacks: Array<((event: EVENT) => unknown) | undefined>
@@ -365,9 +387,8 @@ export function createTurnLifecycle<
       };
       await Promise.all([
         notify(event, options.callbacks.onLanguageModelCallEnd),
-        // The provider-executed tool spans are built from this content.
         notify(
-          { ...event, content: input.content.map(recordableToolOutput) },
+          { ...event, content: recordableModelCallContent(input.content) },
           telemetry.onLanguageModelCallEnd as typeof options.callbacks.onLanguageModelCallEnd,
         ),
       ]);

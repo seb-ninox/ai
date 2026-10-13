@@ -786,9 +786,9 @@ describe('HarnessAgent telemetry integration', () => {
   /*
    * Pi refuses a call whose arguments fail the published schema before any host
    * code runs, and reports it only as a failed result carrying its own text. A
-   * refused host tool arrives exactly like a builtin: provider-executed, with
-   * both of its spans typed `extension`. Those spans used to end as a bare ERROR
-   * with no message.
+   * refused host tool arrives exactly like a builtin: provider-executed, its
+   * span typed `extension`. That span used to end as a bare ERROR with no
+   * message.
    */
   test.each([
     ['a runtime builtin', 'bash'],
@@ -849,13 +849,103 @@ describe('HarnessAgent telemetry integration', () => {
       const toolSpans = exporter
         .getFinishedSpans()
         .filter(span => span.name === `execute_tool ${toolName}`);
-      expect(toolSpans.length).toBeGreaterThan(0);
-      for (const toolSpan of toolSpans) {
-        expect(toolSpan.status).toEqual({
-          code: SPAN_STATUS_ERROR,
-          message: refusal,
-        });
-      }
+      expect(toolSpans).toHaveLength(1);
+      expect(toolSpans[0]!.status).toEqual({
+        code: SPAN_STATUS_ERROR,
+        message: refusal,
+      });
+    },
+  );
+
+  /*
+   * `@ai-sdk/otel` builds a span for every provider-executed call in a model
+   * call's content, and the harness also reports every call as a tool
+   * execution. Each Pi builtin, Pi argument refusal, codemode call and parked
+   * runtime call used to export twice: once under the chat span, once under
+   * the step, a few milliseconds apart.
+   */
+  test.each([
+    {
+      label: 'a builtin that succeeds',
+      outcome: [
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          result: { output: 'ok' },
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+      ],
+    },
+    {
+      label: 'a call the runtime refuses',
+      outcome: [
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          result: 'Validation failed for tool "bash"',
+          isError: true,
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+      ],
+    },
+    {
+      label: 'a call parked for approval',
+      outcome: [
+        { type: 'tool-approval-request', approvalId: 'a1', toolCallId: 'c1' },
+      ],
+    },
+  ] satisfies Array<{ label: string; outcome: HarnessV1StreamPart[] }>)(
+    'exports one tool span, under the step, for $label',
+    async ({ outcome }) => {
+      const harness = scriptedHarness([
+        { type: 'stream-start', modelId: 'otel-model' },
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          input: '{"command":"ls"}',
+          providerExecuted: true,
+        },
+        ...outcome,
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'stop' },
+          totalUsage: usage,
+        },
+      ]);
+      const { exporter, tracer } = createSdkTracer();
+      const agent = new HarnessAgent({
+        harness,
+        sandbox: makeSandboxProvider(),
+        telemetry: {
+          isEnabled: true,
+          integrations: [new OpenTelemetry({ tracer })],
+        },
+      });
+
+      const session = await agent.createSession();
+      await agent.generate({ session, prompt: 'go' });
+      await session.destroy();
+
+      const spans = exporter.getFinishedSpans();
+      const toolSpans = spans.filter(span => span.name === 'execute_tool bash');
+      expect(toolSpans).toHaveLength(1);
+      expect(toolSpans[0]!.attributes['gen_ai.tool.type']).toBe('extension');
+      const parent = spans.find(
+        span =>
+          span.spanContext().spanId === toolSpans[0]!.parentSpanContext?.spanId,
+      );
+      expect(parent?.name).toBe('step 1');
     },
   );
 

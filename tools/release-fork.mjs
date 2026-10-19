@@ -20,6 +20,10 @@
  * Usage:
  *   node tools/release-fork.mjs --dry-run
  *   node tools/release-fork.mjs --build 1
+ *   node tools/release-fork.mjs --build 1 --only harness-pi      # one package, others only resolve aliases
+ *
+ * A version that is already on the registry is skipped, so a run that failed
+ * halfway can simply be repeated.
  *
  * Environment:
  *   FORK_SCOPE      private scope to publish under      (default: @ninox)
@@ -53,6 +57,11 @@ const SUFFIX = process.env.FORK_SUFFIX ?? 'sebninox';
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
 const buildNumber = readFlag(args, '--build') ?? '0';
+/**
+ * Packages to publish, when not all of them. The plan still covers every
+ * target so a dependency between fork packages resolves to its alias.
+ */
+const only = readFlag(args, '--only')?.split(',').map(name => name.trim());
 const REGISTRY =
   readFlag(args, '--registry') ??
   process.env.FORK_REGISTRY ??
@@ -65,6 +74,13 @@ const repoRoot = resolve(import.meta.dirname, '..');
 function readFlag(argv, flag) {
   const index = argv.indexOf(flag);
   return index === -1 ? undefined : argv[index + 1];
+}
+
+for (const name of only ?? []) {
+  if (!TARGETS.includes(name)) {
+    console.error(`release-fork: --only names "${name}", which is not one of: ${TARGETS.join(', ')}`);
+    process.exit(1);
+  }
 }
 
 /** Exit with a readable message instead of a Node stack trace. */
@@ -181,6 +197,19 @@ run('pnpm', [
 const staging = mkdtempSync(join(tmpdir(), 'ai-fork-release-'));
 try {
   for (const entry of plan) {
+    if (only != null && !only.includes(entry.pkg)) {
+      console.log(`\nSkipping ${entry.name}@${entry.version} (not in --only).`);
+      continue;
+    }
+    // npm refuses to publish over an existing version, and that refusal used to
+    // stop the whole run before the later packages had their turn.
+    if (
+      !dryRun &&
+      tryRun('npm', ['view', `${entry.name}@${entry.version}`, 'version', '--registry', REGISTRY]) != null
+    ) {
+      console.log(`\nSkipping ${entry.name}@${entry.version}: already on ${REGISTRY}.`);
+      continue;
+    }
     const packageDir = join(repoRoot, 'packages', entry.pkg);
     const dest = join(staging, entry.pkg);
 

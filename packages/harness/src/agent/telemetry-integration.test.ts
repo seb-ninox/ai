@@ -4,8 +4,10 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
+import { tool } from '@ai-sdk/provider-utils';
 import type { Telemetry } from 'ai';
 import { describe, expect, test } from 'vitest';
+import { z } from 'zod/v4';
 import type {
   HarnessV1,
   HarnessV1NetworkSandboxSession,
@@ -16,6 +18,14 @@ import type {
   HarnessV1StreamPart,
 } from '../v1';
 import { HarnessAgent } from './harness-agent';
+
+/**
+ * `SpanStatusCode.UNSET` — a span that recorded no error. Inlined because
+ * `@opentelemetry/api` is not a dependency of this package.
+ */
+const SPAN_STATUS_UNSET = 0;
+/** `SpanStatusCode.ERROR`, inlined for the same reason. */
+const SPAN_STATUS_ERROR = 2;
 
 const usage = {
   inputTokens: {
@@ -79,6 +89,7 @@ function makeSandboxProvider(): HarnessV1SandboxProvider {
     id: 'sandbox',
     defaultWorkingDirectory: '/work',
     ports: [],
+    getPortEndpoint: async () => ({ url: 'ws://example.test/' }),
     getPortUrl: async () => 'ws://example.test/',
     run: async () => ({ exitCode: 0, stdout: '', stderr: '' }),
     stop: async () => {},
@@ -115,18 +126,22 @@ function recordingIntegration(): {
   integration: Telemetry;
   calls: Array<{ method: string; callId: unknown }>;
   events: Record<string, unknown>;
+  eventLists: Record<string, unknown[]>;
 } {
   const calls: Array<{ method: string; callId: unknown }> = [];
   const events: Record<string, unknown> = {};
+  const eventLists: Record<string, unknown[]> = {};
   const rec =
     (method: string) =>
     (event: unknown): void => {
       calls.push({ method, callId: (event as { callId?: unknown }).callId });
       events[method] = event;
+      (eventLists[method] ??= []).push(event);
     };
   return {
     calls,
     events,
+    eventLists,
     integration: {
       onStart: rec('onStart'),
       onStepStart: rec('onStepStart'),
@@ -164,6 +179,9 @@ describe('HarnessAgent telemetry integration', () => {
         type: 'finish-step',
         finishReason: { unified: 'stop', raw: 'stop' },
         usage,
+        harnessMetadata: {
+          gateway: { generationId: 'generation-id' },
+        },
       },
       {
         type: 'finish',
@@ -179,6 +197,7 @@ describe('HarnessAgent telemetry integration', () => {
       telemetry: { integrations: [integration] },
     });
     const session = await agent.createSession();
+    expect(calls).toEqual([]);
     await agent.generate({ session, prompt: 'go' });
     await session.destroy();
 
@@ -186,9 +205,9 @@ describe('HarnessAgent telemetry integration', () => {
       'onStart',
       'onStepStart',
       'onLanguageModelCallStart',
+      'onLanguageModelCallEnd',
       'onToolExecutionStart',
       'onToolExecutionEnd',
-      'onLanguageModelCallEnd',
       'onStepFinish',
       'onEnd',
     ]);
@@ -200,22 +219,34 @@ describe('HarnessAgent telemetry integration', () => {
       finishReason: unknown;
       usage: unknown;
       performance: unknown;
+      providerMetadata: unknown;
     };
     expect(lmEnd.content).toEqual([
       { type: 'text', text: 'hi' },
-      {
+      expect.objectContaining({
         type: 'tool-call',
         toolCallId: 'c1',
         toolName: 'bash',
-        input: '{"command":"ls"}',
-      },
+        input: { command: 'ls' },
+      }),
+      expect.objectContaining({
+        type: 'tool-result',
+        toolCallId: 'c1',
+        toolName: 'bash',
+        output: { output: 'ok' },
+      }),
     ]);
-    expect(lmEnd.performance).toEqual({
-      responseTimeMs: undefined,
-      timeToFirstOutputMs: undefined,
-      timeBetweenOutputChunksMs: undefined,
-    });
+    expect(lmEnd.performance).toEqual(
+      expect.objectContaining({
+        responseTimeMs: expect.any(Number),
+        timeToFirstOutputMs: expect.any(Number),
+        timeBetweenOutputChunksMs: undefined,
+      }),
+    );
     expect(lmEnd.finishReason).toBe('stop');
+    expect(lmEnd.providerMetadata).toEqual({
+      gateway: { generationId: 'generation-id' },
+    });
     expect(lmEnd.usage).toEqual({
       inputTokens: 5,
       inputTokenDetails: {
@@ -238,17 +269,17 @@ describe('HarnessAgent telemetry integration', () => {
       files: unknown[];
     };
     expect(end.text).toBe('hi');
-    expect(end.finalStep).toEqual({
-      reasoning: [],
-      providerMetadata: undefined,
+    expect(end.finalStep.reasoning).toEqual([]);
+    expect(end.finalStep.providerMetadata).toEqual({
+      gateway: { generationId: 'generation-id' },
     });
     expect(end.toolCalls).toEqual([
-      {
+      expect.objectContaining({
         type: 'tool-call',
         toolCallId: 'c1',
         toolName: 'bash',
-        input: '{"command":"ls"}',
-      },
+        input: { command: 'ls' },
+      }),
     ]);
     expect(end.files).toEqual([]);
     expect(end.finishReason).toBe('stop');
@@ -260,6 +291,198 @@ describe('HarnessAgent telemetry integration', () => {
     const callIds = new Set(calls.map(c => c.callId));
     expect(callIds.size).toBe(1);
     expect([...callIds][0]).toBeTruthy();
+  });
+
+  test('reports fresh turn settings without exposing skills', async () => {
+    const harness = scriptedHarness([
+      { type: 'stream-start' },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', delta: 'done' },
+      { type: 'text-end', id: 't1' },
+      {
+        type: 'finish-step',
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+      },
+      {
+        type: 'finish',
+        finishReason: { unified: 'stop', raw: 'stop' },
+        totalUsage: usage,
+      },
+    ]);
+    const echo = tool({
+      description: 'Echo a value.',
+      inputSchema: z.object({ value: z.string() }),
+    });
+    const reverse = tool({
+      description: 'Reverse a value.',
+      inputSchema: z.object({ value: z.string() }),
+    });
+    const { integration, eventLists } = recordingIntegration();
+    const agent = new HarnessAgent({
+      harness,
+      sandbox: makeSandboxProvider(),
+      telemetry: { integrations: [integration] },
+      callOptionsSchema: z.object({ tenant: z.enum(['alpha', 'beta']) }),
+      prepareCall: ({ options, ...call }) => ({
+        ...call,
+        model: `model-${options.tenant}`,
+        skills: [
+          {
+            name: `${options.tenant}-skill`,
+            description: `${options.tenant} skill`,
+            content: `${options.tenant} skill instructions`,
+          },
+        ],
+        instructions: `${options.tenant} instructions`,
+        tools: options.tenant === 'alpha' ? { echo } : { reverse },
+      }),
+    });
+    const session = await agent.createSession();
+
+    await agent.generate({
+      session,
+      prompt: 'first',
+      options: { tenant: 'alpha' },
+    });
+    await agent.generate({
+      session,
+      prompt: 'second',
+      options: { tenant: 'beta' },
+    });
+    await session.destroy();
+
+    const starts = eventLists.onStart as Array<{
+      modelId: string;
+      instructions: string;
+      tools: Record<string, unknown>;
+      activeTools: string[];
+    }>;
+    expect(
+      starts.map(({ modelId, instructions, tools, activeTools }) => ({
+        modelId,
+        instructions,
+        toolNames: Object.keys(tools),
+        activeTools,
+      })),
+    ).toMatchInlineSnapshot(`
+      [
+        {
+          "activeTools": [
+            "echo",
+          ],
+          "instructions": "alpha instructions",
+          "modelId": "model-alpha",
+          "toolNames": [
+            "echo",
+          ],
+        },
+        {
+          "activeTools": [
+            "reverse",
+          ],
+          "instructions": "beta instructions",
+          "modelId": "model-beta",
+          "toolNames": [
+            "reverse",
+          ],
+        },
+      ]
+    `);
+
+    const stepStarts = eventLists.onStepStart as Array<{
+      modelId: string;
+      instructions: string;
+      tools: Record<string, unknown>;
+      activeTools: string[];
+    }>;
+    expect(
+      stepStarts.map(({ modelId, instructions, tools, activeTools }) => ({
+        modelId,
+        instructions,
+        toolNames: Object.keys(tools),
+        activeTools,
+      })),
+    ).toEqual(
+      starts.map(({ modelId, instructions, tools, activeTools }) => ({
+        modelId,
+        instructions,
+        toolNames: Object.keys(tools),
+        activeTools,
+      })),
+    );
+
+    const modelCallStarts = eventLists.onLanguageModelCallStart as Array<{
+      modelId: string;
+      instructions: string;
+      tools: unknown[];
+    }>;
+    expect(
+      modelCallStarts.map(({ modelId, instructions, tools }) => ({
+        modelId,
+        instructions,
+        tools,
+      })),
+    ).toMatchInlineSnapshot(`
+      [
+        {
+          "instructions": "alpha instructions",
+          "modelId": "model-alpha",
+          "tools": [
+            {
+              "description": "Echo a value.",
+              "inputSchema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "value",
+                ],
+                "type": "object",
+              },
+              "name": "echo",
+              "type": "function",
+            },
+          ],
+        },
+        {
+          "instructions": "beta instructions",
+          "modelId": "model-beta",
+          "tools": [
+            {
+              "description": "Reverse a value.",
+              "inputSchema": {
+                "$schema": "http://json-schema.org/draft-07/schema#",
+                "additionalProperties": false,
+                "properties": {
+                  "value": {
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "value",
+                ],
+                "type": "object",
+              },
+              "name": "reverse",
+              "type": "function",
+            },
+          ],
+        },
+      ]
+    `);
+    expect(
+      Object.values(eventLists)
+        .flat()
+        .every(
+          event =>
+            !Object.prototype.hasOwnProperty.call(event as object, 'skills'),
+        ),
+    ).toBe(true);
   });
 
   test('uses final-step text and reasoning on the telemetry end event', async () => {
@@ -309,7 +532,9 @@ describe('HarnessAgent telemetry integration', () => {
       finalStep: { reasoning: unknown[] };
     };
     expect(end.text).toBe('final');
-    expect(end.finalStep.reasoning).toEqual([{ text: 'final thought' }]);
+    expect(end.finalStep.reasoning).toEqual([
+      { type: 'reasoning', text: 'final thought' },
+    ]);
   });
 
   test('exports normalized OpenTelemetry spans from HarnessAgent turns', async () => {
@@ -351,8 +576,15 @@ describe('HarnessAgent telemetry integration', () => {
       },
     ]);
     const { exporter, tracer } = createSdkTracer();
+    const echo = tool({
+      description: 'Echo a value.',
+      inputSchema: z.object({ value: z.string() }),
+    });
     const agent = new HarnessAgent({
       harness,
+      model: 'requested-model',
+      instructions: 'Answer concisely.',
+      tools: { echo },
       sandbox: makeSandboxProvider(),
       telemetry: {
         isEnabled: true,
@@ -378,6 +610,8 @@ describe('HarnessAgent telemetry integration', () => {
     const rootSpan = getExportedSpan(exporter, 'ai.harness otel-model');
 
     expect(chatSpan!.attributes).toMatchObject({
+      'gen_ai.request.model': 'otel-model',
+      'gen_ai.response.model': 'otel-model',
       'gen_ai.input.messages': JSON.stringify([
         { role: 'user', parts: [{ type: 'text', content: 'go' }] },
       ]),
@@ -385,6 +619,40 @@ describe('HarnessAgent telemetry integration', () => {
       'gen_ai.usage.input_tokens': 5,
       'gen_ai.usage.output_tokens': 2,
     });
+    expect(chatSpan!.attributes['gen_ai.system_instructions']).toBe(
+      JSON.stringify([
+        {
+          type: 'text',
+          content: 'Answer concisely.',
+        },
+      ]),
+    );
+    expect(
+      JSON.parse(
+        chatSpan!.attributes['gen_ai.tool.definitions'] as string,
+      ) as unknown,
+    ).toMatchInlineSnapshot(`
+      [
+        {
+          "description": "Echo a value.",
+          "inputSchema": {
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+              "value": {
+                "type": "string",
+              },
+            },
+            "required": [
+              "value",
+            ],
+            "type": "object",
+          },
+          "name": "echo",
+          "type": "function",
+        },
+      ]
+    `);
     expect(chatSpan!.attributes['gen_ai.output.messages']).toBe(
       JSON.stringify([
         {
@@ -396,6 +664,13 @@ describe('HarnessAgent telemetry integration', () => {
     );
 
     expect(rootSpan.attributes).toMatchObject({
+      'gen_ai.request.model': 'otel-model',
+      'gen_ai.system_instructions': JSON.stringify([
+        {
+          type: 'text',
+          content: 'Answer concisely.',
+        },
+      ]),
       'gen_ai.response.finish_reasons': ['stop'],
       'gen_ai.usage.input_tokens': 5,
       'gen_ai.usage.output_tokens': 2,
@@ -410,7 +685,12 @@ describe('HarnessAgent telemetry integration', () => {
               type: 'tool_call',
               id: 'c1',
               name: 'bash',
-              arguments: '{"command":"ls"}',
+              arguments: { command: 'ls' },
+            },
+            {
+              type: 'tool_call_response',
+              id: 'c1',
+              response: { output: 'ok' },
             },
           ],
           finish_reason: 'stop',
@@ -418,6 +698,256 @@ describe('HarnessAgent telemetry integration', () => {
       ]),
     );
   });
+
+  test('omits turn input attributes when recordInputs is false', async () => {
+    const harness = scriptedHarness([
+      { type: 'stream-start', modelId: 'private-model' },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', delta: 'done' },
+      { type: 'text-end', id: 't1' },
+      {
+        type: 'finish-step',
+        finishReason: { unified: 'stop', raw: 'stop' },
+        usage,
+      },
+      {
+        type: 'finish',
+        finishReason: { unified: 'stop', raw: 'stop' },
+        totalUsage: usage,
+      },
+    ]);
+    const { exporter, tracer } = createSdkTracer();
+    const agent = new HarnessAgent({
+      harness,
+      instructions: 'Do not record.',
+      tools: {
+        secret: tool({
+          inputSchema: z.object({ value: z.string() }),
+        }),
+      },
+      sandbox: makeSandboxProvider(),
+      telemetry: {
+        isEnabled: true,
+        recordInputs: false,
+        integrations: [new OpenTelemetry({ tracer })],
+      },
+    });
+
+    const session = await agent.createSession();
+    await agent.generate({ session, prompt: 'private prompt' });
+    await session.destroy();
+
+    const chatSpan = getExportedSpan(exporter, 'chat private-model');
+    expect(chatSpan.attributes['gen_ai.request.model']).toBe('private-model');
+    expect(chatSpan.attributes).not.toHaveProperty('gen_ai.input.messages');
+    expect(chatSpan.attributes).not.toHaveProperty(
+      'gen_ai.system_instructions',
+    );
+    expect(chatSpan.attributes).not.toHaveProperty('gen_ai.tool.definitions');
+  });
+
+  test('ends the tool span of an approval pause without an error', async () => {
+    const harness = scriptedHarness([
+      { type: 'stream-start', modelId: 'otel-model' },
+      {
+        type: 'tool-call',
+        toolCallId: 'c1',
+        toolName: 'ask_user',
+        input: '{"question":"which app?"}',
+        providerExecuted: true,
+      },
+      { type: 'tool-approval-request', approvalId: 'a1', toolCallId: 'c1' },
+    ]);
+    const { exporter, tracer } = createSdkTracer();
+    const agent = new HarnessAgent({
+      harness,
+      sandbox: makeSandboxProvider(),
+      telemetry: {
+        isEnabled: true,
+        recordInputs: true,
+        recordOutputs: true,
+        integrations: [new OpenTelemetry({ tracer })],
+      },
+    });
+
+    const session = await agent.createSession();
+    await agent.generate({ session, prompt: 'go' });
+    await session.destroy();
+
+    // The call is parked, not failed: its result arrives on the continuation
+    // turn, so the span carries the pending marker and an unset status.
+    const toolSpan = getExportedSpan(exporter, 'execute_tool ask_user');
+    expect(toolSpan.status.code).toBe(SPAN_STATUS_UNSET);
+    expect(toolSpan.attributes['gen_ai.tool.call.result']).toBe(
+      JSON.stringify({ status: 'awaiting-host-input' }),
+    );
+  });
+
+  /*
+   * Pi refuses a call whose arguments fail the published schema before any host
+   * code runs, and reports it only as a failed result carrying its own text. A
+   * refused host tool arrives exactly like a builtin: provider-executed, its
+   * span typed `extension`. That span used to end as a bare ERROR with no
+   * message.
+   */
+  test.each([
+    ['a runtime builtin', 'bash'],
+    ['a registered host tool', 'echo'],
+  ] as const)(
+    'names why the runtime refused %s on its tool spans',
+    async (_label, toolName) => {
+      const providerExecuted = true;
+      const refusal = `Validation failed for tool "${toolName}": - value: must be string`;
+      const harness = scriptedHarness([
+        { type: 'stream-start', modelId: 'otel-model' },
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName,
+          input: '{"value":1}',
+          providerExecuted,
+        },
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName,
+          result: refusal,
+          isError: true,
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'stop' },
+          totalUsage: usage,
+        },
+      ]);
+      const { exporter, tracer } = createSdkTracer();
+      const echo = tool({
+        description: 'Echo a value.',
+        inputSchema: z.object({ value: z.string() }),
+      });
+      const agent = new HarnessAgent({
+        harness,
+        tools: { echo },
+        sandbox: makeSandboxProvider(),
+        telemetry: {
+          isEnabled: true,
+          recordInputs: true,
+          recordOutputs: true,
+          integrations: [new OpenTelemetry({ tracer })],
+        },
+      });
+
+      const session = await agent.createSession();
+      await agent.generate({ session, prompt: 'go' });
+      await session.destroy();
+
+      const toolSpans = exporter
+        .getFinishedSpans()
+        .filter(span => span.name === `execute_tool ${toolName}`);
+      expect(toolSpans).toHaveLength(1);
+      expect(toolSpans[0]!.status).toEqual({
+        code: SPAN_STATUS_ERROR,
+        message: refusal,
+      });
+    },
+  );
+
+  /*
+   * `@ai-sdk/otel` builds a span for every provider-executed call in a model
+   * call's content, and the harness also reports every call as a tool
+   * execution. Each Pi builtin, Pi argument refusal, codemode call and parked
+   * runtime call used to export twice: once under the chat span, once under
+   * the step, a few milliseconds apart.
+   */
+  test.each([
+    {
+      label: 'a builtin that succeeds',
+      outcome: [
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          result: { output: 'ok' },
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+      ],
+    },
+    {
+      label: 'a call the runtime refuses',
+      outcome: [
+        {
+          type: 'tool-result',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          result: 'Validation failed for tool "bash"',
+          isError: true,
+        },
+        {
+          type: 'finish-step',
+          finishReason: { unified: 'tool-calls', raw: 'tool_calls' },
+          usage,
+        },
+      ],
+    },
+    {
+      label: 'a call parked for approval',
+      outcome: [
+        { type: 'tool-approval-request', approvalId: 'a1', toolCallId: 'c1' },
+      ],
+    },
+  ] satisfies Array<{ label: string; outcome: HarnessV1StreamPart[] }>)(
+    'exports one tool span, under the step, for $label',
+    async ({ outcome }) => {
+      const harness = scriptedHarness([
+        { type: 'stream-start', modelId: 'otel-model' },
+        {
+          type: 'tool-call',
+          toolCallId: 'c1',
+          toolName: 'bash',
+          input: '{"command":"ls"}',
+          providerExecuted: true,
+        },
+        ...outcome,
+        {
+          type: 'finish',
+          finishReason: { unified: 'stop', raw: 'stop' },
+          totalUsage: usage,
+        },
+      ]);
+      const { exporter, tracer } = createSdkTracer();
+      const agent = new HarnessAgent({
+        harness,
+        sandbox: makeSandboxProvider(),
+        telemetry: {
+          isEnabled: true,
+          integrations: [new OpenTelemetry({ tracer })],
+        },
+      });
+
+      const session = await agent.createSession();
+      await agent.generate({ session, prompt: 'go' });
+      await session.destroy();
+
+      const spans = exporter.getFinishedSpans();
+      const toolSpans = spans.filter(span => span.name === 'execute_tool bash');
+      expect(toolSpans).toHaveLength(1);
+      expect(toolSpans[0]!.attributes['gen_ai.tool.type']).toBe('extension');
+      const parent = spans.find(
+        span =>
+          span.spanContext().spanId === toolSpans[0]!.parentSpanContext?.spanId,
+      );
+      expect(parent?.name).toBe('step 1');
+    },
+  );
 
   test('fires no telemetry when settings.telemetry is unset', async () => {
     const harness = scriptedHarness([

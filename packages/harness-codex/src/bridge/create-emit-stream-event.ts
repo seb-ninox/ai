@@ -19,6 +19,10 @@ export type CodexItem = {
   result?: { content?: unknown; structured_content?: unknown } | unknown;
   error?: { message?: string };
   query?: string;
+  action?: {
+    query?: string;
+    [key: string]: unknown;
+  };
   message?: string;
   changes?: ReadonlyArray<{
     path: string;
@@ -85,7 +89,7 @@ export function createEmitStreamEvent({
     }
     if (event.type === 'turn.completed') {
       if (event.usage) setTurnUsage(mapUsage(event.usage));
-      stepTracker.finishStep();
+      stepTracker.finishTurn();
       return;
     }
     if (event.type === 'turn.failed') {
@@ -185,6 +189,7 @@ export function createEmitStreamEvent({
           nativeName: item.tool ?? 'unknown',
           input: JSON.stringify(item.arguments ?? {}),
           providerExecuted: true,
+          dynamic: true,
         });
       } else if (event.type === 'item.completed') {
         send({
@@ -192,6 +197,7 @@ export function createEmitStreamEvent({
           toolCallId: id,
           toolName: item.tool ?? 'unknown',
           result: extractMcpToolCallResult(item),
+          dynamic: true,
         });
       }
       observeStep();
@@ -206,7 +212,9 @@ export function createEmitStreamEvent({
           toolCallId: id,
           toolName: toCommonName(nativeName),
           nativeName,
-          input: JSON.stringify({ query: item.query ?? '' }),
+          input: JSON.stringify({
+            query: item.query ?? item.action?.query ?? '',
+          }),
           providerExecuted: true,
         });
       } else if (event.type === 'item.completed') {
@@ -214,7 +222,7 @@ export function createEmitStreamEvent({
           type: 'tool-result',
           toolCallId: id,
           toolName: toCommonName(nativeName),
-          result: item.result ?? null,
+          result: item.result ?? item.action ?? null,
         });
       }
       observeStep();

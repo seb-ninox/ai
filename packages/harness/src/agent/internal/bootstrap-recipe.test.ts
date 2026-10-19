@@ -133,8 +133,9 @@ describe('applyBootstrapRecipe', () => {
         workingDirectory?: string;
         env?: Record<string, string>;
       }) => {
-        const isDirectoryCreation =
-          args.command === 'mkdir -p "$BOOTSTRAP_DIR"';
+        // The path is shell-quoted into the command, so match the prefix
+        // rather than a fixed string.
+        const isDirectoryCreation = args.command.startsWith('mkdir -p ');
         return {
           exitCode: isDirectoryCreation
             ? (opts?.directoryExitCode ?? 0)
@@ -180,10 +181,12 @@ describe('applyBootstrapRecipe', () => {
       baseRecipe.files.length + 1, // recipe files + marker
     );
     expect(run).toHaveBeenCalledTimes(baseRecipe.commands.length + 1);
+    // Quoted into the command, not passed via `env`: a provider that does not
+    // expose `env` to shell parameter expansion would run `mkdir -p ""` and
+    // silently create nothing.
     expect(run).toHaveBeenNthCalledWith(1, {
-      command: 'mkdir -p "$BOOTSTRAP_DIR"',
+      command: "mkdir -p '/tmp/harness/demo'",
       workingDirectory: defaultWorkingDirectory,
-      env: { BOOTSTRAP_DIR: '/tmp/harness/demo' },
       abortSignal: undefined,
     });
     expect(run.mock.calls.map(([args]) => args.workingDirectory)).toEqual([
@@ -204,7 +207,7 @@ describe('applyBootstrapRecipe', () => {
     );
   });
 
-  it('resolves relative file paths and command working directories', async () => {
+  it('resolves relative paths and runs commands from the bootstrap directory', async () => {
     const relativeRecipe: HarnessV1Bootstrap = {
       harnessId: 'demo',
       bootstrapDir: '.harness-bootstrap/demo',
@@ -214,11 +217,7 @@ describe('applyBootstrapRecipe', () => {
           content: 'content',
         },
       ],
-      commands: [
-        { command: 'echo default' },
-        { command: 'echo relative', workingDirectory: 'tools' },
-        { command: 'echo absolute', workingDirectory: '/opt/tools' },
-      ],
+      commands: [{ command: 'echo first' }, { command: 'echo second' }],
     };
     const { session, readTextFile, writeTextFile, run } = makeMockSession();
 
@@ -240,8 +239,7 @@ describe('applyBootstrapRecipe', () => {
     expect(run.mock.calls.map(([args]) => args.workingDirectory)).toEqual([
       '/work',
       '/work/.harness-bootstrap/demo',
-      '/work/tools',
-      '/opt/tools',
+      '/work/.harness-bootstrap/demo',
     ]);
   });
 

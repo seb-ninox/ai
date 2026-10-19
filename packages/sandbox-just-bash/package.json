@@ -1,6 +1,6 @@
 {
   "name": "@ai-sdk/sandbox-just-bash",
-  "version": "1.0.53",
+  "version": "1.0.107",
   "type": "module",
   "license": "Apache-2.0",
   "sideEffects": false,
@@ -37,7 +37,7 @@
   "dependencies": {
     "@ai-sdk/harness": "workspace:*",
     "@ai-sdk/provider-utils": "workspace:*",
-    "just-bash": "^2.14.5"
+    "just-bash": "^3.4.2"
   },
   "devDependencies": {
     "@types/node": "22.19.19",

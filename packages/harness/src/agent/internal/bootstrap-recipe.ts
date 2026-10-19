@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import type { Experimental_SandboxSession as SandboxSession } from '@ai-sdk/provider-utils';
 import type { HarnessV1Bootstrap } from '../../v1';
+import { shellQuote } from '../../utils/shell-quote';
 
 /**
  * Version of the bootstrap recipe shape itself. Bump to force every existing
@@ -122,10 +123,11 @@ export async function applyBootstrapRecipe({
     path: recipe.bootstrapDir,
     defaultWorkingDirectory,
   });
+  // Shell-quoted into the command rather than expanded from `env`, for the
+  // same reason as the session work directory — see `ensureSandboxDirectory`.
   const mkdirResult = await session.run({
-    command: 'mkdir -p "$BOOTSTRAP_DIR"',
+    command: `mkdir -p ${shellQuote(bootstrapDir)}`,
     workingDirectory: defaultWorkingDirectory,
-    env: { BOOTSTRAP_DIR: bootstrapDir },
     abortSignal,
   });
   if (mkdirResult.exitCode !== 0) {
@@ -148,13 +150,7 @@ export async function applyBootstrapRecipe({
   for (const cmd of recipe.commands) {
     const result = await session.run({
       command: cmd.command,
-      workingDirectory:
-        cmd.workingDirectory == null
-          ? bootstrapDir
-          : resolveBootstrapPath({
-              path: cmd.workingDirectory,
-              defaultWorkingDirectory,
-            }),
+      workingDirectory: bootstrapDir,
       abortSignal,
     });
     if (result.exitCode !== 0) {

@@ -132,6 +132,63 @@ describe('doGenerate', () => {
         }
       `);
     });
+
+    it('should omit a reasoning-only response from a follow-up request', async () => {
+      server.urls[CHAT_COMPLETIONS_URL].response = {
+        type: 'json-value',
+        body: {
+          id: 'reasoning-only-response',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: null,
+                reasoning_content: 'Hidden reasoning.',
+              },
+              finish_reason: 'length',
+            },
+          ],
+        },
+      };
+
+      const firstUserMessage = {
+        role: 'user' as const,
+        content: [{ type: 'text' as const, text: 'Think before answering.' }],
+      };
+      const first = await model.doGenerate({
+        prompt: [firstUserMessage],
+      });
+      const reasoningContent = first.content.filter(
+        part => part.type === 'reasoning',
+      );
+
+      expect(reasoningContent).toEqual([
+        { type: 'reasoning', text: 'Hidden reasoning.' },
+      ]);
+
+      await model.doGenerate({
+        prompt: [
+          firstUserMessage,
+          { role: 'assistant', content: reasoningContent },
+          {
+            role: 'user',
+            content: [{ type: 'text', text: 'Continue.' }],
+          },
+        ],
+      });
+
+      expect((await server.calls[1].requestBodyJson).messages).toEqual([
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Think before answering.' }],
+        },
+        {
+          role: 'user',
+          content: [{ type: 'text', text: 'Continue.' }],
+        },
+      ]);
+    });
   });
 
   describe('top-level reasoning', () => {
@@ -251,6 +308,49 @@ describe('doGenerate', () => {
     `);
   });
 
+  it('should preserve unmapped usage fields through raw', async () => {
+    server.urls[CHAT_COMPLETIONS_URL].response = {
+      type: 'json-value',
+      body: {
+        id: 'chatcmpl-cache-type-test',
+        object: 'chat.completion',
+        created: 1770764844,
+        model: 'qwen-plus',
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: 'Hello' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 50,
+          total_tokens: 150,
+          prompt_tokens_details: {
+            cached_tokens: 80,
+            cache_creation_input_tokens: 0,
+            // Alibaba sends this only under explicit context caching. A strict
+            // nested schema would drop it before it reached `raw`.
+            cache_type: 'ephemeral',
+          },
+          completion_tokens_details: {
+            reasoning_tokens: 10,
+          },
+        },
+      },
+    };
+
+    const { usage } = await model.doGenerate({
+      prompt: TEST_PROMPT,
+    });
+
+    expect(
+      (usage.raw as { prompt_tokens_details: { cache_type?: string } })
+        .prompt_tokens_details.cache_type,
+    ).toBe('ephemeral');
+  });
+
   it('should send enable_thinking in request body', async () => {
     prepareJsonFixtureResponse('alibaba-text');
 
@@ -322,6 +422,44 @@ describe('doStream', () => {
   describe('reasoning', () => {
     beforeEach(() => {
       prepareChunksFixtureResponse('alibaba-reasoning');
+    });
+
+    it('should keep reasoning active when deltas include empty tool calls', async () => {
+      server.urls[CHAT_COMPLETIONS_URL].response = {
+        type: 'stream-chunks',
+        chunks: [
+          `data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"test-model",` +
+            `"choices":[{"index":0,"delta":{"role":"assistant","content":"","reasoning_content":"Think ","tool_calls":[]},"finish_reason":null}]}\n\n`,
+          `data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"test-model",` +
+            `"choices":[{"index":0,"delta":{"content":"","reasoning_content":"more...","tool_calls":[]},"finish_reason":null}]}\n\n`,
+          `data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1,"model":"test-model",` +
+            `"choices":[{"index":0,"delta":{"content":"Hello","reasoning_content":"","tool_calls":[]},"finish_reason":"stop"}]}\n\n`,
+          'data: [DONE]\n\n',
+        ],
+      };
+
+      const { stream } = await model.doStream({
+        prompt: TEST_PROMPT,
+      });
+
+      const events = await convertReadableStreamToArray(stream);
+
+      expect(
+        events.filter(({ type }) => type.startsWith('reasoning-')),
+      ).toStrictEqual([
+        { type: 'reasoning-start', id: 'test-reasoning-id' },
+        {
+          type: 'reasoning-delta',
+          id: 'test-reasoning-id',
+          delta: 'Think ',
+        },
+        {
+          type: 'reasoning-delta',
+          id: 'test-reasoning-id',
+          delta: 'more...',
+        },
+        { type: 'reasoning-end', id: 'test-reasoning-id' },
+      ]);
     });
 
     it('should stream reasoning', async () => {

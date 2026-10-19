@@ -18,22 +18,44 @@ export function permissionModeNeedsBuiltinSupport(input: {
 }
 
 export type CustomToolApprovalDecision =
-  | { readonly type: 'allow'; readonly reason?: string }
+  | {
+      readonly type: 'allow';
+      readonly reason?: string;
+      /**
+       * `true` when the allow came from an explicit `approved` status rather
+       * than `not-applicable`: an explicit approval is a policy DECISION, so
+       * the caller records it on the stream as an automatic approval
+       * request/response pair, exactly as automatic denials already are. A
+       * `not-applicable` tool never needed approval and stays silent.
+       */
+      readonly recorded: boolean;
+    }
   | { readonly type: 'deny'; readonly reason?: string }
   | { readonly type: 'request' };
 
-export function resolveCustomToolApproval(input: {
+export async function resolveCustomToolApproval(input: {
   toolName: string;
+  toolInput: unknown;
+  toolContext: unknown;
   toolApproval: HarnessAgentToolApprovalConfiguration | undefined;
-}): CustomToolApprovalDecision {
+}): Promise<CustomToolApprovalDecision> {
+  const configured = input.toolApproval?.[input.toolName];
   const status = normalizeToolApprovalStatus({
-    status: input.toolApproval?.[input.toolName],
+    status:
+      typeof configured === 'function'
+        ? await configured({
+            toolName: input.toolName,
+            input: input.toolInput,
+            context: input.toolContext,
+          })
+        : configured,
   });
 
   switch (status.type) {
     case 'not-applicable':
+      return { type: 'allow', reason: status.reason, recorded: false };
     case 'approved':
-      return { type: 'allow', reason: status.reason };
+      return { type: 'allow', reason: status.reason, recorded: true };
     case 'denied':
       return { type: 'deny', reason: status.reason };
     case 'user-approval':

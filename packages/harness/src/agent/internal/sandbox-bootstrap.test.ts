@@ -4,6 +4,7 @@ import type { HarnessV1Bootstrap } from '../../v1';
 import { hashHarnessBootstrap } from './bootstrap-recipe';
 import {
   createSandboxBootstrapPlan,
+  ensureSandboxDirectory,
   normalizeSandboxWorkDir,
   resolveSessionWorkDir,
   runSandboxBootstrap,
@@ -143,6 +144,47 @@ describe('resolveSessionWorkDir', () => {
   });
 });
 
+describe('ensureSandboxDirectory', () => {
+  it('inlines the quoted path instead of relying on env expansion', async () => {
+    const { session, run } = makeSession();
+
+    await ensureSandboxDirectory({ session, workDir: '/work/ai sdk' });
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const args = run.mock.calls[0]![0] as {
+      command: string;
+      env?: Record<string, string>;
+    };
+    // A provider that does not expose `env` to shell parameter expansion would
+    // otherwise run `mkdir -p ""` and silently create nothing.
+    expect(args.env).toBeUndefined();
+    expect(args.command).toBe("mkdir -p '/work/ai sdk'");
+  });
+
+  it('escapes single quotes in the path', async () => {
+    const { session, run } = makeSession();
+
+    await ensureSandboxDirectory({ session, workDir: "/work/it's" });
+
+    expect((run.mock.calls[0]![0] as { command: string }).command).toBe(
+      "mkdir -p '/work/it'\\''s'",
+    );
+  });
+
+  it('throws when the directory cannot be created', async () => {
+    const run = vi.fn(async () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'permission denied',
+    }));
+    const session = { description: 'mock', run } as unknown as SandboxSession;
+
+    await expect(
+      ensureSandboxDirectory({ session, workDir: '/work/ai-sdk' }),
+    ).rejects.toThrow(/permission denied/);
+  });
+});
+
 describe('runSandboxBootstrap', () => {
   it('runs built-in bootstrap before caller bootstrap', async () => {
     const { session, run, readTextFile, writeTextFile } = makeSession();
@@ -164,9 +206,9 @@ describe('runSandboxBootstrap', () => {
     });
     expect(run.mock.calls.map(([args]) => args.command)).toEqual([
       'pwd',
-      'mkdir -p "$BOOTSTRAP_DIR"',
+      "mkdir -p '/work/.harness-bootstrap/demo'",
       'echo ok',
-      'mkdir -p "$WORK_DIR"',
+      "mkdir -p '/work/ai-sdk'",
     ]);
     expect(readTextFile).toHaveBeenCalledWith({
       path: expect.stringMatching(

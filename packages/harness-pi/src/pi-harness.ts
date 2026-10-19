@@ -4,8 +4,14 @@ import {
   type HarnessV1BuiltinTool,
 } from '@ai-sdk/harness';
 import { tool } from '@ai-sdk/provider-utils';
+import type {
+  ExtensionFactory,
+  McpServerConfig,
+  ToolExposure,
+} from '@earendil-works/pi-coding-agent';
 import { z } from 'zod/v4';
-import type { PiAuthOptions } from './pi-auth';
+import type { PiAuthenticationMode } from './pi-auth';
+import type { PiCodemodeSettings } from './pi-codemode';
 import { piResumeStateSchema } from './pi-resume-state';
 import { createPiSession, type PiThinkingLevel } from './pi-session';
 import { VERSION } from './version';
@@ -21,13 +27,7 @@ const PI_CLIENT_APP = `ai-sdk/harness-pi/${VERSION}`;
  */
 export type PiHarnessSettings = {
   /** Where Pi sources API keys / gateway credentials from. */
-  readonly auth?: PiAuthOptions;
-  /**
-   * Pi model id (or name). Leaving this unset falls back to the AI Gateway
-   * default when `AI_GATEWAY_API_KEY` / `VERCEL_OIDC_TOKEN` is set, and to
-   * Pi's own resolution otherwise.
-   */
-  readonly model?: string;
+  readonly auth?: PiAuthenticationMode;
   /**
    * Pi's extended-thinking budget level. Maps directly to the SDK's
    * `thinkingLevel` option on `createAgentSession`.
@@ -40,6 +40,68 @@ export type PiHarnessSettings = {
    * model settings.
    */
   readonly agentDir?: string;
+  /**
+   * Operating guidance for the agent, surfaced to Pi the way a project's own
+   * `AGENTS.md` is: as a context file rendered into the system prompt's
+   * `<project_context>` block. Nothing is written to disk.
+   *
+   * This is the system-prompt counterpart of the per-turn
+   * `HarnessV1PromptTurnOptions.instructions`, which the contract requires the
+   * adapter to prepend to the first user message instead. Prefer this setting
+   * for guidance that must survive compaction and resumption: the system
+   * prompt is rebuilt from scratch on every session build, whereas a first
+   * user message can be summarized away and is only reapplied on fresh
+   * sessions. The two are independent — setting this does not suppress the
+   * per-turn field.
+   */
+  readonly projectInstructions?: string;
+  /**
+   * Replaces Pi's base system prompt — the "expert coding assistant operating
+   * inside pi" preamble, its tool list, its guidelines and the paths to Pi's own
+   * documentation — with the host's own. Pi still appends what it derives from
+   * the session: the `<project_context>` block (see `projectInstructions`), the
+   * available-skills section, and the working directory.
+   *
+   * Set this when the harness runs an agent that is not a coding assistant: the
+   * default preamble is both a persona the host did not ask for and a per-turn
+   * cost (~500 tokens, most of it Pi's documentation index). Leave it unset to
+   * keep Pi's own prompt.
+   */
+  readonly systemPrompt?: string;
+  /**
+   * MCP server definitions keyed by server name, in Pi's `mcp.json` server
+   * format. Pi's built-in MCP extension connects them. Tools are named
+   * `mcp__<server>__<tool>` and, unless `exposure` says otherwise, are only
+   * callable from codemode scripts.
+   */
+  readonly mcpServers?: Readonly<Record<string, McpServerConfig>>;
+  /**
+   * Trusted inline Pi extensions loaded for each harness session.
+   *
+   * Filesystem-discovered user and project extensions remain disabled.
+   */
+  readonly extensionFactories?: ReadonlyArray<ExtensionFactory>;
+  /**
+   * Makes Anthropic tool calls sequential so each model step observes the
+   * preceding tool result before choosing another tool.
+   */
+  readonly sequentialToolCalls?: boolean;
+  /**
+   * Enables Pi's `codemode` tool: the model writes one JavaScript script that
+   * calls other tools as `tools.<name>(...)`, batching what would otherwise be
+   * several model steps. Which host tools a script may reach is decided by
+   * `toolExposure`. The tool is activated on every session build, fresh or
+   * resumed. Absent means no codemode tool.
+   */
+  readonly codemode?: PiCodemodeSettings;
+  /**
+   * How the model reaches each host tool, by name. Unlisted tools keep Pi's
+   * default (`direct`: declared to the model and callable from scripts).
+   * `model-only` keeps a tool declared while refusing it to codemode scripts,
+   * which is how a host keeps its approval-gated tools out of a script's reach.
+   * Pi's own builtins are not affected.
+   */
+  readonly toolExposure?: Readonly<Record<string, ToolExposure>>;
 };
 
 const PI_BUILTIN_TOOLS = {
@@ -132,18 +194,27 @@ export function createPi(
       const resumeData = lifecycleState?.data as
         | { sessionFileName?: string }
         | undefined;
-
       return createPiSession({
         sessionId: startOpts.sessionId,
         sandboxSession: startOpts.sandboxSession,
         sessionWorkDir: startOpts.sessionWorkDir,
-        skills: startOpts.skills ?? [],
         settings: {
           ...(settings.auth ? { auth: settings.auth } : {}),
-          ...(settings.model ? { model: settings.model } : {}),
           ...(settings.thinkingLevel
             ? { thinkingLevel: settings.thinkingLevel }
             : {}),
+          ...(settings.mcpServers ? { mcpServers: settings.mcpServers } : {}),
+          ...(settings.extensionFactories
+            ? { extensionFactories: settings.extensionFactories }
+            : {}),
+          ...(settings.sequentialToolCalls
+            ? { sequentialToolCalls: true }
+            : {}),
+          ...(settings.codemode ? { codemode: settings.codemode } : {}),
+          ...(settings.toolExposure
+            ? { toolExposure: settings.toolExposure }
+            : {}),
+          ...(startOpts.headers ? { headers: startOpts.headers } : {}),
         },
         clientApp: PI_CLIENT_APP,
         isResume: lifecycleState != null,
@@ -156,6 +227,12 @@ export function createPi(
           ? { abortSignal: startOpts.abortSignal }
           : {}),
         ...(settings.agentDir ? { agentDir: settings.agentDir } : {}),
+        ...(settings.projectInstructions
+          ? { projectInstructions: settings.projectInstructions }
+          : {}),
+        ...(settings.systemPrompt
+          ? { systemPrompt: settings.systemPrompt }
+          : {}),
       });
     },
   };

@@ -4,6 +4,7 @@ export type {
   HarnessAgentSandboxConfig,
   HarnessAgentSettings,
   HarnessAgentToolApprovalConfiguration,
+  HarnessAgentToolApprovalResolver,
 } from '../src/agent/harness-agent-settings';
 export type {
   HarnessAgentAdapter,
@@ -29,13 +30,11 @@ export type {
 } from '../src/agent/harness-agent-types';
 export { HarnessAgentSession } from '../src/agent/harness-agent-session';
 export {
-  collectHarnessAgentToolApprovalContinuations,
-  type HarnessAgentToolApprovalContinuation,
-} from '../src/agent/harness-agent-tool-approval-continuation';
-export {
-  collectHarnessAgentToolResultContinuations,
-  type HarnessAgentToolResultContinuation,
-} from '../src/agent/harness-agent-tool-result-continuation';
+  DEFAULT_PUBLIC_TOOL_ERROR_MESSAGE,
+  HarnessToolError,
+} from '../src/agent/harness-tool-error';
+export { collectHarnessAgentToolApprovalContinuations } from '../src/agent/harness-agent-tool-approval-continuation';
+export { collectHarnessAgentToolResultContinuations } from '../src/agent/harness-agent-tool-result-continuation';
 export {
   prepareHarnessSandboxTemplate,
   prewarmHarness,
@@ -52,6 +51,8 @@ export type {
 } from '../src/agent/observability/types';
 export { HarnessError } from '../src/errors/harness-error';
 export { HarnessCapabilityUnsupportedError } from '../src/errors/harness-capability-unsupported-error';
+export { HarnessSandboxAuthenticationError } from '../src/errors/harness-sandbox-authentication-error';
+export { getHarnessErrorMessage } from '../src/agent/get-harness-error-message';
 export {
   createFileReporter,
   createTraceTreeReporter,

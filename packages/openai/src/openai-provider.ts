@@ -1,4 +1,5 @@
 import type {
+  Experimental_BatchV4 as BatchV4,
   EmbeddingModelV4,
   FilesV4,
   ImageModelV4,
@@ -30,15 +31,16 @@ import type { OpenAIEmbeddingModelId } from './embedding/openai-embedding-model-
 import { OpenAIImageModel } from './image/openai-image-model';
 import type { OpenAIImageModelId } from './image/openai-image-model-options';
 import { openaiTools } from './openai-tools';
-import { OpenAIRealtimeModel } from './realtime/openai-realtime-model';
+import { OpenAIBatch } from './openai-batch';
 import { OpenAIResponsesLanguageModel } from './responses/openai-responses-language-model';
+import { OpenAIRealtimeModel } from './realtime/openai-realtime-model';
 import type { OpenAIResponsesModelId } from './responses/openai-responses-language-model-options';
 import { OpenAISpeechModel } from './speech/openai-speech-model';
 import type { OpenAISpeechModelId } from './speech/openai-speech-model-options';
 import { OpenAITranscriptionModel } from './transcription/openai-transcription-model';
 import type { OpenAITranscriptionModelId } from './transcription/openai-transcription-model-options';
-import { OpenAITranslationModel } from './translation/openai-translation-model';
-import type { OpenAITranslationModelId } from './translation/openai-translation-model-options';
+import { OpenAISpeechTranslationModel } from './speech-translation/openai-speech-translation-model';
+import type { OpenAISpeechTranslationModelId } from './speech-translation/openai-speech-translation-model-options';
 import { OpenAISkills } from './skills/openai-skills';
 import { VERSION } from './version';
 
@@ -103,13 +105,15 @@ export interface OpenAIProvider extends ProviderV4 {
   /**
    * Creates an experimental model for streaming speech translation.
    */
-  translation(modelId: OpenAITranslationModelId): SpeechTranslationModelV4;
+  translation(
+    modelId: OpenAISpeechTranslationModelId,
+  ): SpeechTranslationModelV4;
 
   /**
    * Creates an experimental model for streaming speech translation.
    */
   speechTranslationModel(
-    modelId: OpenAITranslationModelId,
+    modelId: OpenAISpeechTranslationModelId,
   ): SpeechTranslationModelV4;
 
   /**
@@ -132,6 +136,11 @@ export interface OpenAIProvider extends ProviderV4 {
    * Returns a SkillsV4 interface for uploading skills to OpenAI.
    */
   skills(): SkillsV4;
+
+  /**
+   * Returns a BatchV4 interface for processing batches with OpenAI.
+   */
+  experimental_batch(): BatchV4<{ text: OpenAIResponsesModelId }>;
 
   /**
    * OpenAI-specific tools.
@@ -257,9 +266,11 @@ export function createOpenAI(
       webSocket: options.webSocket,
     });
 
-  const createTranslationModel = (modelId: OpenAITranslationModelId) =>
-    new OpenAITranslationModel(modelId, {
-      provider: `${providerName}.translation`,
+  const createSpeechTranslationModel = (
+    modelId: OpenAISpeechTranslationModelId,
+  ) =>
+    new OpenAISpeechTranslationModel(modelId, {
+      provider: `${providerName}.speech-translation`,
       url: ({ path }) => `${baseURL}${path}`,
       headers: getHeaders,
       fetch: options.fetch,
@@ -303,6 +314,7 @@ export function createOpenAI(
   const createResponsesModel = (modelId: OpenAIResponsesModelId) => {
     return new OpenAIResponsesLanguageModel(modelId, {
       provider: `${providerName}.responses`,
+      baseURL,
       url: ({ path }) => `${baseURL}${path}`,
       headers: getHeaders,
       fetch: options.fetch,
@@ -310,6 +322,20 @@ export function createOpenAI(
       fileIdPrefixes: ['file-'],
     });
   };
+
+  const createBatch = () =>
+    new OpenAIBatch({
+      provider: `${providerName}.batch`,
+      config: {
+        provider: `${providerName}.responses`,
+        baseURL,
+        url: ({ path }) => `${baseURL}${path}`,
+        headers: getHeaders,
+        fetch: options.fetch,
+        // Soft-deprecated. TODO: remove in v8
+        fileIdPrefixes: ['file-'],
+      },
+    });
 
   const createRealtimeModel = (modelId: string) =>
     new OpenAIRealtimeModel(modelId, {
@@ -358,13 +384,14 @@ export function createOpenAI(
   provider.transcription = createTranscriptionModel;
   provider.transcriptionModel = createTranscriptionModel;
 
-  provider.translation = createTranslationModel;
-  provider.speechTranslationModel = createTranslationModel;
+  provider.translation = createSpeechTranslationModel;
+  provider.speechTranslationModel = createSpeechTranslationModel;
 
   provider.speech = createSpeechModel;
   provider.speechModel = createSpeechModel;
   provider.files = createFiles;
   provider.skills = createSkills;
+  provider.experimental_batch = createBatch;
 
   provider.experimental_realtime = experimentalRealtimeFactory;
 

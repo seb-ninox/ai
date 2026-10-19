@@ -1,5 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { HarnessV1NetworkSandboxSession } from '@ai-sdk/harness';
 import { createPi } from './pi-harness';
+import { createPiSession } from './pi-session';
+import type * as PiSessionModule from './pi-session';
+
+const mocks = vi.hoisted(() => ({
+  createPiSession: vi.fn(async () => ({})),
+}));
+
+vi.mock('./pi-session', async importOriginal => {
+  const actual = await importOriginal<typeof PiSessionModule>();
+  return { ...actual, createPiSession: mocks.createPiSession };
+});
+
+function startOptions() {
+  return {
+    sessionId: 'session-1',
+    sandboxSession: {} as HarnessV1NetworkSandboxSession,
+    sessionWorkDir: '/sandbox/work',
+  };
+}
 
 describe('createPi adapter', () => {
   it('declares the harness id and builtin tools', () => {
@@ -38,5 +58,71 @@ describe('createPi adapter', () => {
   it('omits getBootstrap (no in-sandbox install needed)', () => {
     const harness = createPi();
     expect(harness.getBootstrap).toBeUndefined();
+  });
+
+  it('forwards projectInstructions to the session', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({ projectInstructions: 'Be concise.' }).doStart(
+      startOptions(),
+    );
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).toMatchObject({
+      projectInstructions: 'Be concise.',
+    });
+  });
+
+  it('omits projectInstructions when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi().doStart(startOptions());
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).not.toHaveProperty(
+      'projectInstructions',
+    );
+  });
+
+  it('forwards sequentialToolCalls to the session', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({ sequentialToolCalls: true }).doStart(startOptions());
+
+    expect(vi.mocked(createPiSession).mock.calls[0]?.[0]).toMatchObject({
+      settings: { sequentialToolCalls: true },
+    });
+  });
+
+  it('forwards codemode and toolExposure to the session, and omits them when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi({
+      codemode: {
+        mode: 'on',
+        inlineBudget: 1200,
+        memoryLimitBytes: 33_554_432,
+        timeoutMs: 60_000,
+      },
+      toolExposure: { modify_schema: 'model-only' },
+    }).doStart(startOptions());
+    await createPi().doStart(startOptions());
+
+    const [withCodemode, withoutCodemode] = vi
+      .mocked(createPiSession)
+      .mock.calls.map(([input]) => input.settings);
+    expect(withCodemode).toEqual({
+      codemode: {
+        mode: 'on',
+        inlineBudget: 1200,
+        memoryLimitBytes: 33_554_432,
+        timeoutMs: 60_000,
+      },
+      toolExposure: { modify_schema: 'model-only' },
+    });
+    expect(withoutCodemode).toEqual({});
+  });
+
+  it('omits sequentialToolCalls when unset', async () => {
+    vi.mocked(createPiSession).mockClear();
+    await createPi().doStart(startOptions());
+
+    expect(
+      vi.mocked(createPiSession).mock.calls[0]?.[0].settings,
+    ).not.toHaveProperty('sequentialToolCalls');
   });
 });

@@ -1,5 +1,14 @@
 import { z } from 'zod/v4';
 
+const piUsageSchema = z.looseObject({
+  input: z.number(),
+  output: z.number(),
+  cacheRead: z.number(),
+  cacheWrite: z.number(),
+  reasoning: z.number().optional(),
+  totalTokens: z.number(),
+});
+
 /**
  * Pi `session.subscribe` emits a discriminated union of events. The exact
  * shape evolves with Pi versions; we accept loose objects and extract only
@@ -12,6 +21,14 @@ export const piSessionEventSchema = z.looseObject({
     .looseObject({
       type: z.string().optional(),
       delta: z.string().optional(),
+      // `toolcall_start` / `toolcall_delta` / `toolcall_end` address a content
+      // block by index rather than by tool call id. The id and name live in the
+      // partial assistant message at that index, which Pi fills in before the
+      // first delta arrives.
+      contentIndex: z.number().optional(),
+      partial: z
+        .looseObject({ content: z.array(z.unknown()).optional() })
+        .optional(),
     })
     .optional(),
   toolCallId: z.string().optional(),
@@ -41,6 +58,7 @@ export const piSessionEventSchema = z.looseObject({
       content: z.unknown().optional(),
       stopReason: z.string().optional(),
       errorMessage: z.string().optional(),
+      usage: piUsageSchema.optional(),
     })
     .optional(),
 });
@@ -99,6 +117,19 @@ export function getPiTerminalError(event: PiSessionEvent): string | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Restores the error kind Pi flattens into its terminal event message.
+ * Consumers use the standard error name to distinguish a recoverable provider
+ * timeout from an ordinary stream failure.
+ */
+export function createPiTerminalError(message: string): Error {
+  const error = new Error(message);
+  if (/\brequest timed out\b/i.test(message)) {
+    error.name = 'TimeoutError';
+  }
+  return error;
 }
 
 /** Pull the assistant text from a `turn_end` / `message_end` event payload. */

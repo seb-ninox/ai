@@ -45,6 +45,14 @@ export interface PiCodemodeSettings {
    * it, never extend it. Absent means no deadline, as in Pi.
    */
   readonly timeoutMs?: number;
+  /**
+   * How many nested tool calls one script may make. The call past the limit
+   * fails inside the script with an error naming the limit, so a script that
+   * loops over a table row by row ends with a message instead of running
+   * until its deadline. Applied whenever any limit is set; absent means
+   * {@link DEFAULT_MAX_NESTED_CALLS}.
+   */
+  readonly maxNestedCalls?: number;
 }
 
 /** The name Pi registers its codemode tool under; the package does not export it. */
@@ -55,6 +63,13 @@ export const PI_CODEMODE_TOOL_NAME = 'codemode';
  * `@earendil-works/pi-coding-agent/dist/extensions/codemode/execute.js`.
  */
 const PI_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024;
+/**
+ * Nested calls one script may make when no cap is configured. Two scripts in
+ * one traced prod-beta week each issued 600+ `query_table` calls from a loop,
+ * one Langfuse span per call; a script that needs more than this is reading
+ * row by row instead of asking for the rows.
+ */
+export const DEFAULT_MAX_NESTED_CALLS = 100;
 const ARGS_PREVIEW_CHARS = 200;
 const ERROR_PREVIEW_CHARS = 500;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
@@ -85,10 +100,15 @@ export function createPiCodemodeExtension(
     models: false,
   });
   const limits: ScriptLimits = {
+    maxNestedCalls: settings.maxNestedCalls,
     memoryLimitBytes: settings.memoryLimitBytes,
     timeoutMs: settings.timeoutMs,
   };
-  if (limits.memoryLimitBytes === undefined && limits.timeoutMs === undefined) {
+  if (
+    limits.maxNestedCalls === undefined &&
+    limits.memoryLimitBytes === undefined &&
+    limits.timeoutMs === undefined
+  ) {
     return extension;
   }
   return pi =>
@@ -145,7 +165,10 @@ export function resolveScriptTimeoutMs(
   );
 }
 
-type ScriptLimits = Pick<PiCodemodeSettings, 'memoryLimitBytes' | 'timeoutMs'>;
+type ScriptLimits = Pick<
+  PiCodemodeSettings,
+  'maxNestedCalls' | 'memoryLimitBytes' | 'timeoutMs'
+>;
 
 type CallStatus = 'running' | 'ok' | 'error' | 'cancelled';
 
@@ -239,11 +262,21 @@ async function executeWithLimits(
       }),
     ]),
   );
+  const maxNestedCalls = limits.maxNestedCalls ?? DEFAULT_MAX_NESTED_CALLS;
   const runNestedCall = async (
     tool: NestedTool,
     args: unknown,
     callSignal: AbortSignal,
   ): Promise<unknown> => {
+    // Counted when the call is made, not when it settles, so a loop that
+    // fires its reads without awaiting them stops at the same place.
+    if (calls.length >= maxNestedCalls) {
+      throw new Error(
+        `Script exceeded its limit of ${maxNestedCalls} nested tool calls. ` +
+          'Ask for the rows you need in one call (filters, limits, fields) instead of one call per row, ' +
+          'or split the work across scripts.',
+      );
+    }
     const record: CallRecord = {
       id: `${toolCallId}/?`,
       name: tool.name,

@@ -179,6 +179,52 @@ describe('createPiCodemodeExtension with script limits', () => {
     expect(nestedSignal?.aborted).toBe(true);
   });
 
+  it('fails the call past the nested-call limit inside the script and names the limit', async () => {
+    const { definition } = await registerCodemode({
+      timeoutMs: 10_000,
+      maxNestedCalls: 2,
+    });
+    const executeTool = vi.fn(async (name: string) =>
+      okOutcome('call-9/1', name, { rows: [] }),
+    );
+
+    const result = await definition.execute(
+      'call-9',
+      {
+        code: "for (let i = 0; i < 5; i += 1) { await tools.query_table({ table: 'orders' }); } return 'unreachable';",
+      },
+      undefined,
+      undefined,
+      contextWith({ tools: [queryTable], executeTool }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(textsOf(result)[1]).toContain(
+      'Script exceeded its limit of 2 nested tool calls.',
+    );
+    expect(executeTool).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps nested calls at the default when only another limit is set', async () => {
+    const { definition } = await registerCodemode({ timeoutMs: 10_000 });
+    const executeTool = vi.fn(async (name: string) =>
+      okOutcome('call-10/1', name, { rows: [] }),
+    );
+
+    const result = await definition.execute(
+      'call-10',
+      {
+        code: "for (let i = 0; i < 150; i += 1) { await tools.query_table({ table: 'orders' }); } return 'unreachable';",
+      },
+      undefined,
+      undefined,
+      contextWith({ tools: [queryTable], executeTool }),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(executeTool).toHaveBeenCalledTimes(100);
+  });
+
   it('waits for a nested call the script abandoned before returning, and keeps it cancelled', async () => {
     const { definition } = await registerCodemode({ timeoutMs: 10_000 });
     let hostAnswered = false;
